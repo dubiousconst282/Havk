@@ -1,0 +1,31 @@
+#pragma once
+
+import Havk.DebugTools;
+
+#ifdef HAVK_ENABLE_SHADER_DEBUG
+    #define DBG(expr) dbg::expr
+    #define DBG_Button dbg::Button
+    #define DBG_Checkbox dbg::Checkbox
+    #define DBG_Slider dbg::Slider
+    #define DBG_Drag dbg::Drag
+    #define DBG_ColorEdit dbg::ColorEdit
+    #define DBG_Text dbg::Text
+    #define DBG_Separator dbg::Separator
+    #define DBG_Plot dbg::Plot
+
+    #pragma warning(disable: 41024)  // comma operator used in expression
+    #define dbg_assert(expr) ((expr) || (dbg::FailAssert(#expr, __FILE__, __LINE__), true))
+    #pragma warning(default: 41024)
+#else
+    #define DBG(expr)
+    #define DBG_Button(...) false
+    #define DBG_Checkbox(label, defaultValue) (defaultValue)
+    #define DBG_Slider(label, defaultValue, ...) (defaultValue)
+    #define DBG_Drag(label, defaultValue, ...) (defaultValue)
+    #define DBG_ColorEdit(label, defaultValue, ...) (defaultValue)
+    #define DBG_Text(...)
+    #define DBG_Separator(...)
+    #define DBG_Plot(...)
+
+    #define dbg_assert(expr)
+#endif
