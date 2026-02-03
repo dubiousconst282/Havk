@@ -11,7 +11,7 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(havk PRIVATE
         "-Wall" "-Wextra" "-Wsign-conversion" "-Wconversion" "-Wno-string-conversion"
         "-Wno-unused-parameter" "-Wno-missing-designated-field-initializers" "-Wno-missing-field-initializers"
-        "-Wno-missing-braces" "-Wno-unused-value"
+        "-Wno-missing-braces" "-Wno-unused-value" "-Wno-implicit-int-float-conversion" "-Wno-return-type"
     )
 endif()
 
@@ -67,5 +67,7 @@ endif()
 if (WIN32)
     target_compile_definitions(ShaderBuildTool PRIVATE _CRT_SECURE_NO_WARNINGS)
     target_compile_definitions(havk PRIVATE _CRT_SECURE_NO_WARNINGS)
-    target_compile_definitions(havk_extensions PRIVATE _CRT_SECURE_NO_WARNINGS _USE_MATH_DEFINES)
+    if (HAVK_ENABLE_GFX_EXTENSIONS)
+        target_compile_definitions(havk_extensions PRIVATE _CRT_SECURE_NO_WARNINGS _USE_MATH_DEFINES)
+    endif()
 endif()
