@@ -74,7 +74,11 @@ if (HAVK_ENABLE_GFX_EXTENSIONS)
         ${implot_SOURCE_DIR}/implot_demo.cpp
     )
     target_include_directories(imgui PUBLIC ${imgui_SOURCE_DIR} ${implot_SOURCE_DIR})
-    target_compile_definitions(imgui PUBLIC IMGUI_DISABLE_OBSOLETE_FUNCTIONS IMPLOT_NO_FORCE_INLINE)
+    target_compile_definitions(imgui PUBLIC
+        IMGUI_DISABLE_OBSOLETE_FUNCTIONS
+        # ImPlot takes a long time to clean build at -O2. This speeds it up by over 3x.
+        IMPLOT_NO_FORCE_INLINE "IMPLOT_CUSTOM_NUMERIC_TYPES=\(ImS32\)\(float\)\(double\)"
+    )
 
     if (HAVK_ENABLE_GLFW)
         find_package(glfw3 QUIET)

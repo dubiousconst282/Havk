@@ -1041,7 +1041,7 @@ static VkImageType GetImageType(VkImageViewType type) {
         case VK_IMAGE_VIEW_TYPE_CUBE:
         case VK_IMAGE_VIEW_TYPE_2D_ARRAY:
         case VK_IMAGE_VIEW_TYPE_CUBE_ARRAY: return VK_IMAGE_TYPE_2D;
-        default: HAVK_ASSERT(!"Image type not supported");
+        default: HAVK_ASSERT(!"Image type not supported"); return VK_IMAGE_TYPE_2D;
     }
 }
 static VkComponentSwizzle ParseSwizzle(char ch) {

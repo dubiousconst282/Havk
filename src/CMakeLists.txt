@@ -11,7 +11,7 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(havk PRIVATE
         "-Wall" "-Wextra" "-Wsign-conversion" "-Wconversion" "-Wno-string-conversion"
         "-Wno-unused-parameter" "-Wno-missing-designated-field-initializers" "-Wno-missing-field-initializers"
-        "-Wno-missing-braces" "-Wno-unused-value" "-Wno-implicit-int-float-conversion" "-Wno-return-type"
+        "-Wno-missing-braces" "-Wno-unused-value" "-Wno-implicit-int-float-conversion"
     )
 endif()
 
