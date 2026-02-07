@@ -27,7 +27,7 @@ int main(int argc, const char** args) {
     havx::Shadebug::Initialize(device.get());
 
     // Create renderer stuff
-    auto camera = havx::Camera { .Position = { 0, 0, 5 }, .MoveSpeed = 10.0 };
+    auto camera = havx::Camera { .Position = { 0, 1, 5 }, .MoveSpeed = 10.0 };
     havk::ImagePtr colorBuffer, depthBuffer, normalBuffer;
 
     auto storageBuffer = device->CreateBuffer(1024 * 1024, havk::BufferFlags::DeviceMem);

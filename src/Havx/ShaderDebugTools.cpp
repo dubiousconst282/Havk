@@ -31,7 +31,7 @@ enum class CommandType : uint8_t {
     UI_ColorEdit, UI_Plot,
     G_SetColor, G_SetTransform, G_PushTransform, G_PopTransform,
     G_Translate, G_Scale, G_RotateX, G_RotateY, G_RotateZ,
-    G_Line, G_Cube, G_Sphere, G_Text,
+    G_Line, G_Cube, G_Sphere, G_Arrow, G_Text,
 
     G_ShapeFirst = G_Line, G_ShapeCount = G_Text - G_ShapeFirst + 1,
 };
@@ -124,7 +124,8 @@ struct ShapeBuilder {
                 memcpy(instance.Pos, args, 6 * sizeof(float));
                 break;
             }
-            case CommandType::G_Cube: {
+            case CommandType::G_Cube:
+            case CommandType::G_Arrow: {
                 memcpy(instance.Pos, args, 6 * sizeof(float));
                 break;
             }
@@ -316,7 +317,7 @@ struct ShadebugContext {
     havk::BufferPtr StorageBuffer;
 
     havk::AttachmentLayout CurrDrawAttachLayout;
-    havk::GraphicsPipelinePtr DrawCubePipeline, DrawLinePipeline, DrawSpherePipeline;
+    havk::GraphicsPipelinePtr DrawCubePipeline, DrawLinePipeline, DrawSpherePipeline, DrawArrowPipeline;
     havk::BufferPtr CubeIndexBuffer;
 
     ShapeBuilder ShapeBuf;
@@ -606,7 +607,8 @@ struct ShadebugContext {
                 }
                 case CommandType::G_Line:
                 case CommandType::G_Cube:
-                case CommandType::G_Sphere: {
+                case CommandType::G_Sphere:
+                case CommandType::G_Arrow: {
                     if (pars.ColorBuffer == nullptr || PauseFrame || ShapeBuf.IsOutOfSpace()) break;
 
                     ShapeBuf.Add(type, cmd.Data, "");
@@ -887,6 +889,9 @@ struct ShadebugContext {
             DrawSpherePipeline = Device->CreateGraphicsPipeline({ shbind::VS_DrawSphere::Module, shbind::FS_DrawSphere::Module },
                                                                 rasterState, attachLayout);
 
+            DrawArrowPipeline = Device->CreateGraphicsPipeline({ shbind::VS_DrawArrow::Module, shbind::FS_DrawArrow::Module },
+                                                               rasterState, attachLayout);
+
             havk::GraphicsPipelineState lineRasterState = rasterState;
             lineRasterState.Raster = { .Topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST, .LineWidth = havk::dynamic_state };
             DrawLinePipeline = Device->CreateGraphicsPipeline({ shbind::VS_DrawLine::Module, shbind::FS_DrawLine::Module },
@@ -943,11 +948,14 @@ struct ShadebugContext {
             if (batch.ShapeType == CommandType::G_Line) {
                 // TODO: maybe actually record and apply line width properly
                 vkCmdSetLineWidth(cmds.Handle, ShapeBuf.StrokeWidth);
-                cmds.Draw(*DrawLinePipeline, { .NumVertices = batch.Count * 2, .VertexOffset = batch.StorageOffset * 2});
+                cmds.Draw(*DrawLinePipeline, { .NumVertices = batch.Count * 2, .VertexOffset = batch.StorageOffset * 2 });
             } else if (batch.ShapeType == CommandType::G_Cube) {
                 cmds.DrawIndexed(*DrawCubePipeline, { .NumIndices = batch.Count * 36, .VertexOffset = batch.StorageOffset * 8 });
             } else if (batch.ShapeType == CommandType::G_Sphere) {
                 cmds.DrawIndexed(*DrawSpherePipeline, { .NumIndices = batch.Count * 36, .VertexOffset = batch.StorageOffset * 8 });
+            } else if (batch.ShapeType == CommandType::G_Arrow) {
+                const int subdiv = 12;
+                cmds.Draw(*DrawArrowPipeline, { .NumVertices = subdiv * 3 + subdiv * 6, .NumInstances = batch.Count, .InstanceOffset = batch.StorageOffset });
             } else {
                 HAVK_ASSERT(!"TODO");
             }

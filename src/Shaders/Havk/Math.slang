@@ -180,6 +180,15 @@ public float3x3 BuildOrthonormalBasis(float3 n) {
     return float3x3(b1, b2, n);
 }
 
+public float3x3 Inverse(float3x3 m) {
+    m = transpose(m);
+    float3x3 inv;
+    inv[0] = cross(m[1], m[2]);
+    inv[1] = cross(m[2], m[0]);
+    inv[2] = cross(m[0], m[1]);
+    return inv * rcp(dot(m[0], inv[0]));
+}
+
 };
 
 // TODO: consider moving BSDF stuff here

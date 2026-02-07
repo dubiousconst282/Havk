@@ -1,4 +1,5 @@
 import Havk.Core;
+import Havk.Math;
 
 [vk::constant_id(991)] uint64_t havk__DebugToolsCtx = 0;
 [vk::constant_id(992)] uint32_t havk__DebugToolsProgramId = 0;
@@ -50,7 +51,7 @@ enum CommandType : uint8_t {
     UI_ColorEdit, UI_Plot,
     G_SetColor, G_SetTransform, G_PushTransform, G_PopTransform,
     G_Translate, G_Scale, G_RotateX, G_RotateY, G_RotateZ,
-    G_Line, G_Cube, G_Sphere, G_Text,
+    G_Line, G_Cube, G_Sphere, G_Arrow, G_Text,
 };
 struct Command {
     uint8_t Length;
@@ -303,9 +304,10 @@ public void DrawSphere3D(float3 center, float radius) {
     EMIT_CMD(G_Sphere, 4);
     storeAligned<4>((float4*)&cmd->Data[0], float4(center, radius));
 }
-public void DrawArrow3D(float3 origin, float3 direction, float headSize = 0.2) {
-    DrawLine3D(origin, origin + direction);
-    // TODO: draw arrows with proper perspective and look, "--->"
+public void DrawArrow3D(float3 origin, float3 direction) {
+    EMIT_CMD(G_Arrow, 6);
+    storeAligned<4>((float3*)&cmd->Data[0], origin);
+    storeAligned<4>((float3*)&cmd->Data[3], direction);
 }
 public void DrawText3D<each T : IFormattable>(float3 pos, string fmt, expand each T args) {
     if (havk__DebugToolsCtx == 0 || !IsEnabled) return;
@@ -348,7 +350,9 @@ extension string : IFormattable {
 
 uint2 GetCurrentTID() {
     __stage_switch {
-        case compute: {
+        case compute:
+        case mesh:
+        case amplification: {
             uint3 invocId = spirv_asm { result:$$uint3 = OpLoad builtin(GlobalInvocationId:uint3); };
             return invocId.xy;
         }
@@ -356,8 +360,14 @@ uint2 GetCurrentTID() {
             float4 fragCoord = spirv_asm { result:$$float4 = OpLoad builtin(FragCoord:float4); };
             return uint2(fragCoord.xy);
         }
+        case vertex: {
+            uint vertexId = spirv_asm { result:$$int = OpLoad builtin(VertexIndex:int); };
+            uint instanceId = spirv_asm { result:$$int = OpLoad builtin(InstanceIndex:int); };
+            uint drawId = spirv_asm { result:$$int = OpLoad builtin(DrawIndex:int); };
+            return uint2(vertexId, instanceId);
+        }
         default:
-            static_assert(false, "InvocationId is not supported in this shader stage.");
+            static_assert(false, "ThreadID is not defined in this shader stage.");
             return 0;
     }
 }
@@ -589,6 +599,50 @@ void FS_DrawCube(float4 color, float3 vertPosRWS, out float4 outColor: SV_Target
     outNormal.w = 1;
 }
 
+[shader("vertex")]
+void VS_DrawArrow(
+    uniform DrawParams pc,
+    uint vertexId: SV_VulkanVertexID,
+    uint instanceId: SV_VulkanInstanceID,
+    out float4 clipPos: SV_Position,
+    out float4 color, out float3 normal)
+{
+    ShapeInstance obj = pc.Objects[instanceId];
+    float3x4 transform = pc.Transforms[obj.TransformIdx];
+
+    const int subdiv = 12;
+    const float headLength = 0.15, headRadius = 0.03, tailRadius = 0.01;
+    float len = length(obj.Pos[1]);
+
+    bool isHead = vertexId < subdiv * 3;
+    uint turn = isHead ? vertexId : vertexId / 2u;
+    float a = ((turn / 3u) + (turn % 3u)) * math::Tau / (subdiv - 1);
+    float3 vertPos = float3(sin(a), cos(a), 0);
+    normal = vertPos;
+
+    if (isHead) { // cone with triangles
+        bool isCenterPoint = (vertexId % 3u) == 2;
+        vertPos.xy *= (isCenterPoint ? 0 : headRadius);
+        vertPos.z = (isCenterPoint ? len : len - headLength);
+        if (isCenterPoint) normal = float3(0, 0, 1);
+    } else { // cylinder with quads
+        vertPos.xy *= tailRadius;
+        vertPos.z = (vertexId % 2u) * (len - headLength / 2);
+    }
+    float3x3 TBN = math::BuildOrthonormalBasis(normalize(obj.Pos[1]));
+    vertPos = mul(transform, float4(mul(vertPos, TBN) + obj.Pos[0], 1));
+    normal = mul(transform, float4(mul(normal, TBN), 0));
+
+    clipPos = mul(pc.ProjMat, float4(vertPos, 1));
+    color = unpackUnorm4x8ToFloat(obj.Color).bgra;
+}
+[shader("fragment")]
+void FS_DrawArrow(float4 color, float3 normal, out float4 outColor: SV_Target0, out float4 outNormal: SV_Target1) {
+    outColor = color;
+    outNormal.xyz = normalize(normal) * 0.5 + 0.5;
+    outNormal.w = 1;
+}
+
 // We'll render spheres through impostor cubes + rejection in fragment shader, because why not...
 // https://bgolus.medium.com/rendering-a-sphere-on-a-quad-13c92025570c
 [shader("vertex")]
@@ -604,7 +658,7 @@ void VS_DrawSphere(
 {
     ShapeInstance obj = pc.Objects[vertexId >> 3];
     float3x4 transform = pc.Transforms[obj.TransformIdx];
-    float3 viewOriginOS = mul(Inverse(float3x3(transform)), pc.ViewOrigin - transform._m03_m13_m23);
+    float3 viewOriginOS = mul(math::Inverse(float3x3(transform)), pc.ViewOrigin - transform._m03_m13_m23);
 
     float3 center = obj.Pos[0];
     radius = obj.Pos[1].x;
@@ -658,15 +712,6 @@ void CS_CopyImageToRGBA8(
     float4 value = inBounds ? srcImage.Load(pos + srcRect.xy) : 0;
     uint4 q = uint4(saturate(value) * 255.0 + 0.5);
     dstBuffer[pos.x + pos.y * dstStride] = q.r << 0 | q.g << 8 | q.b << 16 | q.a << 24;
-}
-
-float3x3 Inverse(float3x3 m) {
-    m = transpose(m);
-    float3x3 inv;
-    inv[0] = cross(m[1], m[2]);
-    inv[1] = cross(m[2], m[0]);
-    inv[2] = cross(m[0], m[1]);
-    return inv * rcp(dot(m[0], inv[0]));
 }
 
 // https://iquilezles.org/articles/intersectors

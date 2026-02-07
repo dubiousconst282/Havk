@@ -932,7 +932,7 @@ struct CommandList final : Resource {
 
     void Draw(const GraphicsPipeline& pipeline, const DrawCommand& cmd, PushConstantData pc = {}) {
         BindPipeline(pipeline, pc);
-        vkCmdDraw(Handle, cmd.NumVertices, cmd.NumInstances, cmd.VertexOffset, cmd.NumInstances);
+        vkCmdDraw(Handle, cmd.NumVertices, cmd.NumInstances, cmd.VertexOffset, cmd.InstanceOffset);
     }
     void DrawIndexed(const GraphicsPipeline& pipeline, const DrawIndexedCommand& cmd, PushConstantData pc = {}) {
         BindPipeline(pipeline, pc);

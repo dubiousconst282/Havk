@@ -14,12 +14,9 @@ void CS_DebugToolsDemo(
     uniform float4x4 invProj,
     uint tid: SV_DispatchThreadID)
 {
-    // Widgets and shapes are only emitted if `dbg::IsEnabled` is set to true. The following helpers are available:
-    //
+    // Widgets and shapes are only emitted if `dbg::IsEnabled` is set to true. The following helpers can also be used:
     // - `dbg::EnableIfPicked()`: Enable if selected by pixel picker, comparing against DispatchThreadID or FragCoord.
     // - `dbg::EnableOnce()`: Enable one single invocation of current shader (arbitrary order, as determined by atomic racing).
-    //
-    // Multiple invocations can be enabled, but can artifact/flicker under high stress, as internal command buffer runs out of space.
     if (tid % 1024 == 0 && tid < 1024 * 4) {
         dbg::IsEnabled = true;
         dbg::Text("Hello from thread %d", tid);
@@ -48,6 +45,7 @@ void CS_DebugToolsDemo(
 
     if (!dbg::Checkbox("Animate", true)) time = 0;
 
+    // 3D shapes
     if (dbg::Checkbox("Show Normals", true)) {
         int2 screenPos = dbg::GetPickedTID().xy;
         float depth = depthBuffer.Load(screenPos);
@@ -58,11 +56,16 @@ void CS_DebugToolsDemo(
 
         dbg::SetFill(1, 1, 1);
         dbg::DrawText3D(worldPos, "\nPosition: %.3v3f\nNormal: %.1v3f", worldPos, normal);
-        dbg::SetStroke(float4(1, 1, 0, 1));
-        dbg::DrawArrow3D(worldPos + normal * 0.04, normal);
+        dbg::SetFill(normal * 0.5 + 0.5);
+        dbg::DrawArrow3D(worldPos + normal * 0.08, normal * 0.5);
     }
+    dbg::SetFill(1, 1, 1);
+    dbg::DrawCube3D(float3(-1, -0.1, -1), float3(+1, 0, +1));
 
-    // 3D shapes
+    dbg::SetFill(1, 0, 0); dbg::DrawArrow3D(0, float3(1, 0, 0));
+    dbg::SetFill(0, 1, 0); dbg::DrawArrow3D(0, float3(0, 1, 0));
+    dbg::SetFill(0, 0, 1); dbg::DrawArrow3D(0, float3(0, 0, 1));
+
     if (tid < shapeCount) {
         dbg::IsEnabled = true;
         float3 color = havk::colorutils::HSV_to_sRGB(float3(fract(tid / 9.66), 0.9, 0.9));
@@ -78,7 +81,7 @@ void CS_DebugToolsDemo(
         dbg::RotateX(time * (tid % 2 == 0 ? 0.2 : -0.5) + tid * 3.56);
         dbg::RotateY(time * (tid % 2 == 0 ? 0.5 : -0.8) + tid * 7.62);
 
-        float3 pos = float3(tid / 5, 0, tid % 5) * 5;
+        float3 pos = float3(tid / 5, 1, tid % 5) * 5;
         float radius = 1 + abs(sin(time * 3.14159));
 
         if ((tid & 2) == 0) {
@@ -131,16 +134,17 @@ void CS_ComposeDebug(
         color = colorBuffer.Load(screenPos);
         float3 normal = normalBuffer.Load(screenPos).xyz * 2 - 1;
 
+        if (all(color.rgb == 1)) {
+            float4 ndcPos = mul(invProj, float4(screenPos, depth, 1));
+            float3 worldPos = ndcPos.xyz / ndcPos.w + viewOrigin;
+
+            bool3 checker = fract(worldPos + 0.0001) < 0.5;
+            float3 c = select(checker.yzx ^ checker.zxy, 1.0, 0.8);
+            float3 m = pow(abs(normal), 20.0);
+            color.rgb *= (c.x * m.x + c.y * m.y + c.z * m.z) / (m.x + m.y + m.z);
+        }
         color.rgb *= max(0.1, dot(normal, normalize(float3(-0.2, 1.0, 0.8)))) +
                      max(0.1, dot(normal, normalize(float3(0.2, -0.3, -0.8))));
-
-        float4 ndcPos = mul(invProj, float4(screenPos, depth, 1));
-        float3 worldPos = ndcPos.xyz / ndcPos.w + viewOrigin;
-
-        bool3 checker = fract(worldPos + 0.0001) < 0.5;
-        float3 c = select(checker.yzx ^ checker.zxy, 1.0, 0.8);
-        float3 m = pow(abs(normal), 20.0);
-        color.rgb *= (c.x * m.x + c.y * m.y + c.z * m.z) / (m.x + m.y + m.z);
     }
     colorBuffer.Store(screenPos, color);
 }
