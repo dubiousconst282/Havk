@@ -328,6 +328,7 @@ struct ShadebugContext {
     int2 PickerDragOrigin = { 0, 0 };
     bool ShowPicker = false;
     bool PauseFrame = false;
+    shbind::FrameDebugContext PausedFrameCtx = {};
 
     ShadebugContext(havk::DeviceContext* device) : Device(device) {
         uint32_t extraSize = kPickerGridSize * kPickerGridSize * 4 + kPlotStorageSize * sizeof(float);
@@ -474,7 +475,7 @@ struct ShadebugContext {
         auto pixelPickData = buffer.bump_slice(kPickerGridSize * kPickerGridSize);
 
         ctx.CmdBufferPos = 0;
-        ctx.CmdBufferEnd = buffer.size();
+        ctx.CmdBufferEnd = PauseFrame ? 0 : buffer.size();
         ctx.CommandData = buffer;
 
         cmds.UpdateBuffer(*StorageBuffer, 0, sizeof(shbind::FrameDebugContext), &ctx);
@@ -499,20 +500,30 @@ struct ShadebugContext {
             memset(widgetKeys.data(), 0, widgetKeys.size_bytes());
         }
 
+        bool wasPaused = PauseFrame;
+
         ImGui::SameLine();
-        ImGui::SetNextItemShortcut(ImGuiMod_Ctrl | ImGuiKey_F, ImGuiInputFlags_RouteGlobal);
+        ImGui::SetNextItemShortcut(ImGuiMod_Ctrl | ImGuiKey_F, ImGuiInputFlags_RouteGlobal | ImGuiInputFlags_Tooltip);
         if (ctx.WantPauseAfterFrame) {
             PauseFrame = true;
-            ImGui::NavHighlightActivated(ImGui::GetID("Pause Shapes"));
+            ImGui::NavHighlightActivated(ImGui::GetID("Pause"));
         }
-        ImGui::Checkbox("Pause Shapes", &PauseFrame);
+        ImGui::Checkbox("Pause", &PauseFrame);
+
+        if (PauseFrame) {
+            if (!wasPaused) {
+                PausedFrameCtx = ctx;
+            } else {
+                ctx = PausedFrameCtx;
+            }
+        }
 
         ImGui::SetNextItemWidth(6 * ImGui::GetFontSize());
         ImGui::DragInt2("Selected TID", &PickerSelectedPos.x, 0.5f);
 
         if (pars.PickImage != nullptr) {
             ImGui::SameLine();
-            ImGui::SetNextItemShortcut(ImGuiMod_Ctrl | ImGuiKey_G, ImGuiInputFlags_RouteGlobal);
+            ImGui::SetNextItemShortcut(ImGuiMod_Ctrl | ImGuiKey_G, ImGuiInputFlags_RouteGlobal | ImGuiInputFlags_Tooltip);
             ImGui::Checkbox("Show Picker", &ShowPicker);
 
             if (ctx.FrameCount == 0) {
@@ -535,7 +546,7 @@ struct ShadebugContext {
 
         if (ShapeBuf.StorageBuffer == nullptr) {
             ShapeBuf.CreateBuffers(Device);
-        } else if (!PauseFrame) {
+        } else {
             ShapeBuf.Reset();
         }
         float4x4 proj = pars.ProjMat;
@@ -585,7 +596,7 @@ struct ShadebugContext {
                     break;
                 }
                 case CommandType::G_SetColor: {
-                    if (pars.ColorBuffer == nullptr || PauseFrame) break;
+                    if (pars.ColorBuffer == nullptr) break;
 
                     ShapeBuf.FillColor = cmd.Data[0];
                     ShapeBuf.StrokeColor = cmd.Data[1];
@@ -600,7 +611,7 @@ struct ShadebugContext {
                 case CommandType::G_RotateY:
                 case CommandType::G_RotateX:
                 case CommandType::G_RotateZ: {
-                    if (pars.ColorBuffer == nullptr || PauseFrame) break;
+                    if (pars.ColorBuffer == nullptr) break;
 
                     ShapeBuf.UpdateTransform(type, cmd.Data);
                     break;
@@ -609,13 +620,13 @@ struct ShadebugContext {
                 case CommandType::G_Cube:
                 case CommandType::G_Sphere:
                 case CommandType::G_Arrow: {
-                    if (pars.ColorBuffer == nullptr || PauseFrame || ShapeBuf.IsOutOfSpace()) break;
+                    if (pars.ColorBuffer == nullptr || ShapeBuf.IsOutOfSpace()) break;
 
                     ShapeBuf.Add(type, cmd.Data, "");
                     break;
                 }
                 case CommandType::G_Text: {
-                    if (pars.ColorBuffer == nullptr || PauseFrame || ShapeBuf.IsOutOfSpace()) break;
+                    if (pars.ColorBuffer == nullptr || ShapeBuf.IsOutOfSpace()) break;
 
                     const char* fmt = GetProgramString(cmd.ProgramId, cmd.Data[3]);
                     std::string text = FormatProgramString(fmt, cmd.ProgramId, &cmd.Data[4]);
