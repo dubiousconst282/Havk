@@ -1,5 +1,6 @@
 import Havk.Core;
 import Havk.Math;
+import Havk.ColorUtils;
 
 [vk::constant_id(991)] uint64_t havk__DebugToolsCtx = 0;
 [vk::constant_id(992)] uint32_t havk__DebugToolsProgramId = 0;
@@ -34,7 +35,7 @@ struct FrameDebugContext {
     uint32_t NumFailedAsserts;
     uint32_t* WidgetHashTable; // Keys[], followed by WidgetState[]
     uint32_t* CommandData;
-    float* PlotData;
+    uint32_t* ScratchData;
 };
 struct WidgetState {
     StringId Label;
@@ -48,7 +49,7 @@ enum CommandType : uint8_t {
     UI_Button, UI_Checkbox, UI_Combo,
     UI_Slider,
     UI_Drag1, UI_Drag2, UI_Drag3, UI_Drag4,
-    UI_ColorEdit, UI_Plot,
+    UI_ColorEdit, UI_PlotLines, UI_PlotImage,
     G_SetColor, G_SetTransform, G_PushTransform, G_PopTransform,
     G_Translate, G_Scale, G_RotateX, G_RotateY, G_RotateZ,
     G_Line, G_Cube, G_Sphere, G_Arrow, G_Text,
@@ -210,12 +211,12 @@ public uint Combo(string label, uint defaultIndex, string options) {
     }
     return widget->Params[0];
 }
-public void Plot(string label, IFunc<float, float> sampler) {
+public void PlotLines(string label, IFunc<float, float> sampler) {
     if (!IsEnabled) return;
-    FIND_WIDGET(CommandType.UI_Plot, label, );
+    FIND_WIDGET(CommandType.UI_PlotLines, label, );
     if (justAdded) widget->Params[1] = 0;
 
-    float* data = &ctx->PlotData[widget->Params[0]];
+    float* data = (float*)&ctx->ScratchData[widget->Params[0]];
     uint numSamples = widget->Params[1];
     float rangeMin = asfloat(widget->Params[2]);
     float rangeMax = asfloat(widget->Params[3]);
@@ -224,6 +225,16 @@ public void Plot(string label, IFunc<float, float> sampler) {
     for (uint i = 0; i < numSamples; i++) {
         data[i] = sampler(i * scale + rangeMin);
     }
+}
+public void PlotImage(string label, uint2 size, uint2 pos, IFunc<float4> getValue) {
+    FIND_WIDGET(CommandType.UI_PlotImage, label, );
+
+    if (widget->Params[0] != size.x || widget->Params[1] != size.y) {
+        widget->Params[0] = size.x;
+        widget->Params[1] = size.y;
+    }
+    let canvas = reinterpret<ImageHandle2D<float4>>(widget->Params[2]);
+    if (canvas) canvas.Store(pos, getValue());
 }
 
 public void PushID(uint id) {
@@ -712,6 +723,54 @@ void CS_CopyImageToRGBA8(
     float4 value = inBounds ? srcImage.Load(pos + srcRect.xy) : 0;
     uint4 q = uint4(saturate(value) * 255.0 + 0.5);
     dstBuffer[pos.x + pos.y * dstStride] = q.r << 0 | q.g << 8 | q.b << 16 | q.a << 24;
+}
+
+enum ImageViewerFlags {
+    R = 1, G = 2, B = 4, A = 8,
+    Luma = 16, Gamma = 32,
+};
+
+struct ImageViewerParams {
+    TextureHandle2D<float4> SrcImage;
+    SamplerHandle Sampler;
+    uint Flags;
+    float2 ColorRange;
+    float4 SrcRect;
+    float4 ClipRect;
+};
+
+[shader("vertex")]
+void VS_ImageViewer(uniform ImageViewerParams pc, uint vertexId: SV_VertexID,
+                    out float4 clipPos: SV_Position, out float2 texcoord)
+{
+    float2 uv = uint2(0b101100, 0b110010) >> vertexId & 1;
+    clipPos = float4(uv * pc.ClipRect.zw + pc.ClipRect.xy, 0, 1);
+    texcoord = uv * pc.SrcRect.zw + pc.SrcRect.xy;
+}
+[shader("fragment")]
+float4 FS_ImageViewer(uniform ImageViewerParams pc, float2 texcoord, int2 screenPos : SV_Position) {
+    float4 color = pc.SrcImage.Sample(pc.Sampler, texcoord);
+
+    color = color * pc.ColorRange.x + pc.ColorRange.y;
+
+    uint flags = pc.Flags;
+    if ((flags & ImageViewerFlags.R) == 0) color.r = 0;
+    if ((flags & ImageViewerFlags.G) == 0) color.g = 0;
+    if ((flags & ImageViewerFlags.B) == 0) color.b = 0;
+    if ((flags & ImageViewerFlags.A) == 0) color.a = 1;
+
+    if ((flags & ImageViewerFlags.Gamma) == 0) {
+        color.rgb = havk::colorutils::sRGB_from_Linear(color.rgb);
+    }
+
+    if ((flags & ImageViewerFlags.Luma) != 0) { // assumes single channel
+        if ((flags & ImageViewerFlags.A) == 0) color.a = 0;
+        color.rgb = dot(color, 1);
+    } else {
+        float checker = ((screenPos.x ^ screenPos.y) & 32) != 0 ? 1 : 0.75;
+        color.rgb = lerp(checker, color.rgb, color.a);
+    }
+    return float4(color.rgb, 1);
 }
 
 // https://iquilezles.org/articles/intersectors

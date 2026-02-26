@@ -1,11 +1,13 @@
-#include "ShaderDebugTools.h"
-#include "SystemUtils.h"
-#include "Yson.h"
-
 #define IMGUI_DEFINE_MATH_OPERATORS
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <implot.h>
+
+#include "ShaderDebugTools.h"
+#include "ImGuiRenderer.h"
+#include "SystemUtils.h"
+#include "Yson.h"
+
 #include "Shaders/Havk/DebugTools.h"
 
 #include <bit>
@@ -19,7 +21,7 @@ namespace havx {
 static constexpr uint32_t kConstId_ContextPtr = 991, kConstId_ProgramId = 992, kConstId_MaxWidgetSlots = 993;
 static constexpr uint32_t kMaxWidgetSlots = 2048; // MUST be a power of two.
 static constexpr int kPickerGridSize = 20;
-static constexpr int kPlotStorageSize = 65536;
+static constexpr int kContextScratchSize = 65536;
 
 enum class CommandType : uint8_t {
     None,
@@ -28,7 +30,7 @@ enum class CommandType : uint8_t {
     UI_Button, UI_Checkbox, UI_Combo,
     UI_Slider,
     UI_Drag1, UI_Drag2, UI_Drag3, UI_Drag4,
-    UI_ColorEdit, UI_Plot,
+    UI_ColorEdit, UI_PlotLines, UI_PlotImage,
     G_SetColor, G_SetTransform, G_PushTransform, G_PopTransform,
     G_Translate, G_Scale, G_RotateX, G_RotateY, G_RotateZ,
     G_Line, G_Cube, G_Sphere, G_Arrow, G_Text,
@@ -310,6 +312,22 @@ struct ShapeBuilder {
     }
 };
 
+struct ImageViewerState {
+    enum DisplayFlags {
+        R = 1, G = 2, B = 4, A = 8,
+        Luma = 16, Gamma = 32,
+        RGBA = R | G | B | A,
+    };
+    int Flags = R | G | B | Gamma;
+    float2 ColorRange = float2(0, 1);
+    float2 ViewPos = float2(0);
+    float ViewSize = 1;
+    bool PoppedOut = false;
+    int LastUsedFrame = 0;
+
+    havk::ImagePtr Canvas;
+};
+
 struct ShadebugContext {
     havk::DeviceContext* Device;
     std::vector<ProgramData> Programs;
@@ -330,8 +348,11 @@ struct ShadebugContext {
     bool PauseFrame = false;
     shbind::FrameDebugContext PausedFrameCtx = {};
 
+    std::unordered_map<uint32_t, ImageViewerState> ActiveImagePlots;
+    havk::GraphicsPipelinePtr ImageViewerPipeline;
+
     ShadebugContext(havk::DeviceContext* device) : Device(device) {
-        uint32_t extraSize = kPickerGridSize * kPickerGridSize * 4 + kPlotStorageSize * sizeof(float);
+        uint32_t extraSize = kPickerGridSize * kPickerGridSize * 4 + kContextScratchSize * sizeof(uint32_t);
         StorageBuffer = device->CreateBuffer(1024 * 1024 * 16 + extraSize, havk::BufferFlags::HostMem_Cached);
         memset(StorageBuffer->MappedData, 0, StorageBuffer->Size);
 
@@ -471,7 +492,7 @@ struct ShadebugContext {
 
         ctx.WidgetHashTable = buffer.bump_slice(kMaxWidgetSlots);
         auto widgetData = buffer.bump_slice<shbind::WidgetState>(kMaxWidgetSlots);
-        ctx.PlotData = buffer.bump_slice<float>(kPlotStorageSize);
+        ctx.ScratchData = buffer.bump_slice(kContextScratchSize);
         auto pixelPickData = buffer.bump_slice(kPickerGridSize * kPickerGridSize);
 
         ctx.CmdBufferPos = 0;
@@ -491,7 +512,7 @@ struct ShadebugContext {
         auto ctx = *buffer.bump_slice<shbind::FrameDebugContext>(1).data();  // copy
         auto widgetKeys = buffer.bump_slice(kMaxWidgetSlots);
         auto widgetData = buffer.bump_slice<shbind::WidgetState>(kMaxWidgetSlots);
-        auto plotData = buffer.bump_slice<float>(kPlotStorageSize);
+        auto scratchData = buffer.bump_slice(kContextScratchSize);
         auto pixelPickData = buffer.bump_slice(kPickerGridSize * kPickerGridSize);
 
         ImGui::Begin("ShaderDebugTools");
@@ -574,13 +595,13 @@ struct ShadebugContext {
                     auto type = (CommandType)(cmd.Data[0] & 255);
                     shbind::WidgetState& state = widgetData[cmd.Data[0] >> 8].value;
 
-                    if (type == CommandType::UI_Plot) {
+                    if (type == CommandType::UI_PlotLines) {
                         activePlots.push_back(&cmd);
-                        break;
+                    } else {
+                        ImGui::PushID(&state);
+                        DrawWidget(type, cmd.ProgramId, state);
+                        ImGui::PopID();
                     }
-                    ImGui::PushID(&state);
-                    DrawWidget(type, cmd.ProgramId, state);
-                    ImGui::PopID();
                     break;
                 }
                 case CommandType::UI_Text:
@@ -661,7 +682,7 @@ struct ShadebugContext {
                     shbind::WidgetState& state = widgetData[cmd->Data[0] >> 8].value;
                     const char* label = GetProgramString(cmd->ProgramId, state.Label);
 
-                    float* data = &plotData[state.Params[0]].value;
+                    float* data = (float*)scratchData.data() + state.Params[0];
                     uint32_t numSamples = state.Params[1];
                     float rangeMin = asfloat(state.Params[2]);
                     float rangeMax = asfloat(state.Params[3]);
@@ -679,6 +700,12 @@ struct ShadebugContext {
                 ImPlot::EndPlot();
             }
             ImGui::EndChild();
+        }
+
+        for (auto& [widgetId, viewer] : ActiveImagePlots) {
+            if (viewer.Canvas && ImGui::GetFrameCount() - viewer.LastUsedFrame >= 2) {
+                viewer.Canvas = nullptr;
+            }
         }
 
         ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -828,8 +855,8 @@ struct ShadebugContext {
         }
     }
 
-    void DrawWidget(CommandType type, uint32_t programId, shbind::WidgetState& state) {
-        const char* label = GetProgramString(programId, state.Label);
+    void DrawWidget(CommandType type, uint32_t programId, shbind::WidgetState& widget) {
+        const char* label = GetProgramString(programId, widget.Label);
         bool changed = false;
 
         switch (type) {
@@ -838,21 +865,21 @@ struct ShadebugContext {
                 break;
             }
             case CommandType::UI_Checkbox: {
-                changed = ImGui::CheckboxFlags(label, &state.Params[0], 1);
+                changed = ImGui::CheckboxFlags(label, &widget.Params[0], 1);
                 break;
             }
             case CommandType::UI_Combo: {
-                const char* srcOptions = GetProgramString(programId, state.Params[1]);
+                const char* srcOptions = GetProgramString(programId, widget.Params[1]);
                 char options[2048] = {};
                 for (uint32_t i = 0; i < sizeof(options) - 1 && srcOptions[i] != '\0'; i++) {
                     options[i] = (srcOptions[i] == ';') ? '\0' : srcOptions[i];
                 }
-                changed = ImGui::Combo(label, (int*)&state.Params[0], options);
+                changed = ImGui::Combo(label, (int*)&widget.Params[0], options);
                 break;
             }
             case CommandType::UI_Slider: {
-                float* fargs = (float*)state.Params;
-                const char* fmt = GetProgramString(programId, state.Params[3]);
+                float* fargs = (float*)widget.Params;
+                const char* fmt = GetProgramString(programId, widget.Params[3]);
                 changed = ImGui::SliderFloat(label, &fargs[0], fargs[1], fargs[2], fmt);
                 break;
             }
@@ -860,23 +887,198 @@ struct ShadebugContext {
             case CommandType::UI_Drag2:
             case CommandType::UI_Drag3:
             case CommandType::UI_Drag4: {
-                float* fargs = (float*)state.Params;
+                float* fargs = (float*)widget.Params;
                 float speed = (fargs[5] - fargs[4]) / 250;
-                const char* fmt = GetProgramString(programId, state.Params[6]);
+                const char* fmt = GetProgramString(programId, widget.Params[6]);
                 int ncomp = (int)type - (int)CommandType::UI_Drag1 + 1;
                 ImGui::DragScalarN(label, ImGuiDataType_Float, fargs, ncomp, speed, &fargs[4], &fargs[5], fmt);
                 return;
             }
             case CommandType::UI_ColorEdit: {
-                float* color = (float*)state.Params;
+                float* color = (float*)widget.Params;
                 changed = ImGui::ColorEdit4(label, color, ImGuiColorEditFlags_Float | (color[3] < 0 ? ImGuiColorEditFlags_NoAlpha : 0));
+                break;
+            }
+            case CommandType::UI_PlotImage: {
+                ImageViewerState* viewer = &ActiveImagePlots[widget.Label];
+
+                uint2 size = uint2(widget.Params[0], widget.Params[1]);
+                bool visible = DrawImageViewer(label, viewer, size);
+
+                widget.Params[2] = visible && viewer->Canvas && !PauseFrame ? viewer->Canvas->DescriptorHandle.HeapIndex : 0;
+                if (visible) viewer->LastUsedFrame = (int)ImGui::GetFrameCount();
+
                 break;
             }
             default: HAVK_ASSERT(!"Unknown widget type"); break;
         }
         if (changed) {
-            state.Params[6] = (uint32_t)ImGui::GetFrameCount();
+            widget.Params[6] = (uint32_t)ImGui::GetFrameCount();
         }
+    }
+
+    // TODO-MAYBE: refactor & expose this to take arbitrary images?
+    bool DrawImageViewer(const char* label, ImageViewerState* state, uint2 imageSize) {
+        const auto headerFlags = ImGuiTreeNodeFlags_CollapsingHeader | ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_AllowOverlap;
+        bool headerOpen = ImGui::TreeNodeEx(label, headerFlags, "");
+
+        ImGui::SameLine(0, 0);
+        {
+            float btnSize = ImGui::GetFrameHeight();
+            if (ImGui::InvisibleButton("##popout", ImVec2(btnSize, btnSize))) state->PoppedOut ^= true;
+
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            float iconSize = ImGui::GetFontSize();
+            float center = ImMax(0.0f, (btnSize - iconSize) * 0.5f);
+
+            if (ImGui::IsItemHovered()) {
+                dl->AddRectFilled(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), ImGui::GetColorU32(ImGuiCol_FrameBgHovered));
+            }
+            ImGui::RenderArrowDockMenu(dl, ImGui::GetItemRectMin() + ImVec2(center, center), iconSize, ImGui::GetColorU32(ImGuiCol_Text));
+        }
+        ImGui::SameLine();
+        ImGui::TextUnformatted(label);
+
+        if (!headerOpen && !state->PoppedOut) return false;
+        
+        bool ownWindow = state->PoppedOut;
+        if (ownWindow) {
+            char title[256];
+            snprintf(title, sizeof(title), "Image Viewer: %s", label);
+            ImGui::Begin(title, &state->PoppedOut);
+        }
+
+        for (uint32_t i = 0; i < 4; i++) {
+            static const char* ids[] = { "##R", "##G", "##B", "##A" };
+            static ImU32 cols[] = {
+                IM_COL32(0xF0, 0x40, 0x40, 255), IM_COL32(0x50, 0xD0, 0x60, 255), IM_COL32(0x50, 0x60, 0xF0, 255),
+                IM_COL32(0xA0, 0xA0, 0xA0, 255)
+            };
+            if (i != 0) ImGui::SameLine();
+
+            ImGui::PushStyleColor(ImGuiCol_FrameBg, cols[i]);
+            ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, cols[i] | 0x1F1F1F);
+            ImGui::PushStyleColor(ImGuiCol_CheckMark, 0xFFFFFFFF);
+            ImGui::CheckboxFlags(ids[i], &state->Flags, 1 << i);
+            ImGui::PopStyleColor(3);
+
+            if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+                state->Flags ^= ImageViewerState::RGBA & ~(1 << i);
+            }
+        }
+
+        int numActiveChannels = std::popcount((uint32_t)(state->Flags & ImageViewerState::RGBA));
+        if (numActiveChannels == 1) {
+            state->Flags |= ImageViewerState::Luma;
+        } else {
+            state->Flags &= ~ImageViewerState::Luma;
+        }
+
+        // TODO-MAYBE: auto fit color range
+        // ImGui::SameLine();
+        // ImGui::Button("Fit");
+
+        ImGui::SameLine();
+
+        float unitWidth = ImGui::CalcTextSize("0").x;
+        ImGui::SetNextItemWidth(unitWidth * 16);
+        ImGui::DragFloatRange2("Range", &state->ColorRange.x, &state->ColorRange.y, 0.05f, 0, 0, "%g");
+
+        ImGui::SameLine();
+        ImGui::CheckboxFlags("Gamma", &state->Flags, ImageViewerState::Gamma);
+
+        if (ownWindow) {
+            // TODO: image diffing (abs delta, swipe)?
+        }
+
+        ImVec2 previewSize = ImGui::GetContentRegionAvail();
+        previewSize.y = std::max(previewSize.y, std::min(200.0f, (float)imageSize.y));
+
+        float imageRatio = imageSize.x / (float)imageSize.y;
+        float previewRatio = previewSize.x / previewSize.y;
+
+        if (imageRatio > previewRatio) {
+            previewSize.y = previewSize.x / imageRatio;
+        } else {
+            previewSize.x = previewSize.y * imageRatio;
+        }
+
+        bool visible = ImGui::BeginChild("ImageArea", previewSize, 0, ImGuiWindowFlags_NoMove);
+
+        if (visible) {
+            ImGuiIO& io = ImGui::GetIO();
+            ImVec2 screenPos = ImGui::GetCursorScreenPos();
+
+            if (ImGui::IsWindowHovered()) {
+                ImGui::SetKeyOwner(ImGuiKey_MouseWheelY, ImGui::GetItemID());
+
+                if (io.MouseWheel != 0 && (io.MouseWheel < 0 || state->ViewSize > 1e-3f)) {
+                    ImVec2 center = (io.MousePos - screenPos) / previewSize;
+                    float zoom = state->ViewSize * (io.MouseWheel * 0.15f);
+
+                    state->ViewPos += float2(center.x, center.y) * zoom;
+                    state->ViewSize = glm::clamp(state->ViewSize - zoom, 1e-3f, 1.0f);
+                }
+            }
+            if (ImGui::IsMouseDragging(ImGuiMouseButton_Left) && ImGui::IsItemActive()) {
+                float2 delta = float2(io.MouseDelta.x / previewSize.x, io.MouseDelta.y / previewSize.y);
+                state->ViewPos -= state->ViewSize * delta;
+            }
+            state->ViewPos = glm::clamp(state->ViewPos, 0.0f, 1.0f - state->ViewSize);
+
+            if (state->Canvas == nullptr || state->Canvas->Size != uint3(imageSize, 1)) {
+                state->Canvas = Device->CreateImage({
+                    .Format = VK_FORMAT_R16G16B16A16_SFLOAT,
+                    .Usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                    .Size = uint3(imageSize, 1),
+                });
+            }
+
+            havx::ImGuiRenderer::AddShaderCallback(ImGui::GetWindowDrawList(), [=, this](ImDrawData* drawData, havk::CommandList& cmdList, VkFormat format) {
+                if (!state->Canvas) return;
+
+                if (ImageViewerPipeline == nullptr) {
+                    havk::GraphicsPipelineState rasterState = {
+                        .Raster = { .FrontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE, .CullFace = VK_CULL_MODE_NONE },
+                        .Depth = { .TestOp = VK_COMPARE_OP_ALWAYS },
+                    };
+                    ImageViewerPipeline = Device->CreateGraphicsPipeline(
+                        { shbind::VS_ImageViewer::Module, shbind::FS_ImageViewer::Module },
+                        rasterState, { .Formats = { format } });
+                }
+
+                ImVec2 clipScale = ImVec2(2.0f, 2.0f) / drawData->DisplaySize;
+                ImVec2 clipOffset = (screenPos - drawData->DisplayPos) * clipScale - ImVec2(1.0f, 1.0f);
+
+                shbind::ImageViewerParams pc = {
+                    .SrcImage = *state->Canvas,
+                    .Sampler = Device->DescriptorHeap->GetSampler({
+                        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+                        .magFilter = VK_FILTER_NEAREST,
+                        .minFilter = VK_FILTER_LINEAR,
+                        .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+                        .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+                        .borderColor = VK_BORDER_COLOR_INT_TRANSPARENT_BLACK,
+                    }),
+                    .Flags = (uint32_t)state->Flags,
+                    .ColorRange = GetRangeRemapCoeffs(state->ColorRange.x, state->ColorRange.y),
+                    .SrcRect = float4(state->ViewPos, state->ViewSize, state->ViewSize),
+                    .ClipRect = float4(clipOffset.x, clipOffset.y, previewSize.x * clipScale.x, previewSize.y * clipScale.y),
+                };
+                cmdList.Draw(*ImageViewerPipeline, { .NumVertices = 6 }, pc);
+            });
+        }
+        ImGui::EndChild();
+
+        if (ownWindow) ImGui::End();
+
+        return visible;
+    }
+
+    static float2 GetRangeRemapCoeffs(float a, float b) {
+        // (x-a)/(b-a) = x*w+o
+        float w = 1.0f / (b - a);
+        return float2(w, -a * w);
     }
 
     void BeginDrawingShapes(havk::CommandList& cmds, const Shadebug::DrawFrameParams& pars) {

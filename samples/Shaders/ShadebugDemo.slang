@@ -27,11 +27,6 @@ void CS_DebugToolsDemo(
     float time = dbg::GetTime();
     dbg::Text("Time: %.1f Frame: %d", time, dbg::GetFrameCount());
 
-    // Graphing of 1D expressions
-    dbg::Plot("Sin(x)", (float x) => sin(x + time));
-    dbg::Plot("Sqr(x)", (float x) => fract(floor(x + time) * 0.5) * 4 + 2);
-    dbg::Plot("Saw(x)", (float x) => abs(fract(x + time) * 4 - 2) - 4);
-
     // Stateful widgets are shared per label/ID and can be read or added by any invocation, even when `IsEnabled=false`.
     // We are dispatching one million invocations for stress testing, so the counter should increment accordingly.
     if (dbg::Button("Click me")) {
@@ -65,6 +60,17 @@ void CS_DebugToolsDemo(
     dbg::SetFill(1, 0, 0); dbg::DrawArrow3D(0, float3(1, 0, 0));
     dbg::SetFill(0, 1, 0); dbg::DrawArrow3D(0, float3(0, 1, 0));
     dbg::SetFill(0, 0, 1); dbg::DrawArrow3D(0, float3(0, 0, 1));
+
+    // Graphing of 1D expressions
+    dbg::PlotLines("Sin(x)", (float x) => sin(x + time));
+    dbg::PlotLines("Sqr(x)", (float x) => fract(floor(x + time) * 0.5) * 4 + 2);
+    dbg::PlotLines("Saw(x)", (float x) => abs(fract(x + time) * 4 - 2) - 4);
+
+    // Arbitrary image plotting
+    int2 p = int2(tid % 1000, tid / 1000);
+    dbg::PlotImage("Pixel Plotting", uint2(256), p, () => float4(fract(p / 64.0), 0, 1));
+    dbg::PlotImage("Normal Buffer", normalBuffer.Size / 2, p, () => normalBuffer.Load(p * 2));
+    dbg::PlotImage("Depth Buffer", depthBuffer.Size / 2, p, () => float4(0.01 / depthBuffer.Load(p * 2).xxx, 1));
 
     if (tid < shapeCount) {
         dbg::IsEnabled = true;
