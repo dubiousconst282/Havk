@@ -10,6 +10,7 @@ struct ImGuiDrawParams {
     float2 Offset;
     ImDrawVert* Vertices;
     TextureHandle2D Texture;
+    SamplerHandle Sampler;
 };
 [vk::push_constant] ImGuiDrawParams pc;
 
@@ -23,7 +24,6 @@ void VS_ImGuiDrawMain(uint vertexId: SV_VulkanVertexID, out float4 clipPos: SV_P
 
 [shader("fragment")]
 float4 FS_ImGuiDrawMain(float2 uv, float4 color) {
-    let sampler = havk::GetSampler(havk::FilterMode::Linear, havk::WrapMode::ClampToEdge);
-    color *= pc.Texture.Sample(sampler, uv);
+    color *= pc.Texture.Sample(pc.Sampler, uv);
     return color;
 }

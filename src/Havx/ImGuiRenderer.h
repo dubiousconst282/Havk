@@ -8,23 +8,21 @@
 namespace havx {
 
 struct ImGuiRenderer {
-private:
-    havk::DeviceContext* _device;
-    havk::GraphicsPipelinePtr _pipeline;
-    VkFormat _renderFormat;
+    havk::DeviceContext* Device;
+    havk::GraphicsPipelinePtr Pipeline;
+    VkFormat OutputFormat;
 
-public:
     ImGuiRenderer(havk::DeviceContext* device, VkFormat outputFormat) {
-        _device = device;
-        _renderFormat = GetUNormFormat(outputFormat);
+        Device = device;
+        OutputFormat = GetUNormFormat(outputFormat);
 
         havk::GraphicsPipelineState state = {
             .Raster = { .FrontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE, .CullFace = VK_CULL_MODE_NONE },
             .Depth = { .TestOp = VK_COMPARE_OP_ALWAYS },
             .Blend = { .AttachmentStates = { havk::ColorBlendingState::kSrcOver } },
         };
-        havk::AttachmentLayout layout = { .Formats = { _renderFormat } };
-        _pipeline = _device->CreateGraphicsPipeline({ shader::VS_ImGuiDrawMain::Module, shader::FS_ImGuiDrawMain::Module }, state, layout);
+        havk::AttachmentLayout layout = { .Formats = { OutputFormat } };
+        Pipeline = Device->CreateGraphicsPipeline({ shader::VS_ImGuiDrawMain::Module, shader::FS_ImGuiDrawMain::Module }, state, layout);
 
         ImGuiIO& io = ImGui::GetIO();
 
@@ -46,11 +44,11 @@ public:
             auto backend = (ImGuiRenderer*)ImGui::GetIO().BackendRendererUserData;
 
             VkSurfaceKHR surface;
-            HAVK_CHECK((VkResult)platform_io.Platform_CreateVkSurface(vp, (ImU64)backend->_device->Instance, nullptr, (ImU64*)&surface));
+            HAVK_CHECK((VkResult)platform_io.Platform_CreateVkSurface(vp, (ImU64)backend->Device->Instance, nullptr, (ImU64*)&surface));
 
-            auto swapchain = backend->_device->CreateSwapchain(surface).release();
+            auto swapchain = backend->Device->CreateSwapchain(surface).release();
             swapchain->SetPreferredPresentModes({ VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_IMMEDIATE_KHR, VK_PRESENT_MODE_FIFO_KHR });
-            swapchain->SetPreferredFormats({ { backend->_renderFormat } }, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+            swapchain->SetPreferredFormats({ { backend->OutputFormat } }, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
             vp->RendererUserData = swapchain;
         };
         platform_io.Renderer_DestroyWindow = [](ImGuiViewport* vp) {
@@ -153,13 +151,6 @@ public:
         }
     }
 
-    // Get ImGui texture ID. The image *must* be visible to STAGE_FRAGMENT and under READ_ONLY or GENERAL layout just before the call to
-    // Render().
-    ImTextureID GetTextureID(const havk::Image* image, VkFilter filter = VK_FILTER_LINEAR) {
-        HAVK_ASSERT(filter == VK_FILTER_LINEAR); // Custom views and filter not supported yet
-        return (ImTextureID)image;
-    }
-
     void RenderDrawLists(ImDrawData* draw_data, havk::CommandList& cmdList) {
         // Avoid rendering when minimized, scale coordinates for retina displays (screen coordinates != framebuffer coordinates)
         int fb_width = (int)(draw_data->DisplaySize.x * draw_data->FramebufferScale.x);
@@ -179,10 +170,30 @@ public:
 
         size_t bufferSize = (size_t)draw_data->TotalVtxCount * sizeof(ImDrawVert) +
                             (size_t)draw_data->TotalIdxCount * sizeof(ImDrawIdx);
-        auto renderBuffer = _device->CreateBuffer(bufferSize, havk::BufferFlags::MapSeqWrite);
+        auto renderBuffer = Device->CreateBuffer(bufferSize, havk::BufferFlags::MapSeqWrite);
 
         // Setup desired Vulkan state
         BindRenderState(draw_data, cmdList, fb_width, fb_height, *renderBuffer);
+
+        RenderState state = { .Instance = this, .DrawData = draw_data, .CmdList = cmdList };
+        ImGui::GetPlatformIO().Renderer_RenderState = &state;
+
+        auto linearSampler = Device->DescriptorHeap->GetSampler({
+            .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+            .magFilter = VK_FILTER_LINEAR,
+            .minFilter = VK_FILTER_LINEAR,
+            .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+            .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+            .borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,
+        });
+        auto nearestSampler = Device->DescriptorHeap->GetSampler({
+            .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+            .magFilter = VK_FILTER_NEAREST,
+            .minFilter = VK_FILTER_LINEAR,
+            .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+            .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+            .borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,
+        });
 
         // Will project scissor/clipping rectangles into framebuffer space
         ImVec2 clip_off = draw_data->DisplayPos;          // (0,0) unless using multi-viewports
@@ -191,7 +202,7 @@ public:
         // Upload vertex data and record draw commands
         auto vertexSpan = renderBuffer->Slice<ImDrawVert>(0, (size_t)draw_data->TotalVtxCount);
         auto indexSpan = renderBuffer->Slice<ImDrawIdx>(vertexSpan.size_bytes(), (size_t)draw_data->TotalIdxCount);
-        havk::Image* lastTexure = nullptr;
+        ImTextureID currTexId = 0;
 
         for (const ImDrawList* draw_list : draw_data->CmdLists) {
             for (const ImDrawCmd& cmd : draw_list->CmdBuffer) {
@@ -201,6 +212,7 @@ public:
                     // state.)
                     if (cmd.UserCallback == ImDrawCallback_ResetRenderState) {
                         BindRenderState(draw_data, cmdList, fb_width, fb_height, *renderBuffer);
+                        currTexId = 0;
                     } else {
                         cmd.UserCallback(draw_list, &cmd);
                     }
@@ -224,13 +236,15 @@ public:
                         (uint32_t)(clip_max.y - clip_min.y),
                     });
 
-                    auto texture = (havk::Image*)cmd.GetTexID();
-                    if (texture != lastTexure) {
-                        cmdList.PushConstants({ &texture->DescriptorHandle, offsetof(shader::ImGuiDrawParams, Texture), sizeof(havk::ImageHandle) });
-                        lastTexure = texture;
+                    if (cmd.GetTexID() != currTexId) {
+                        currTexId = cmd.GetTexID();
+                        uint32_t pars[] = {
+                            GetTexturePtr(currTexId)->DescriptorHandle.HeapIndex,
+                            GetTextureFilter(currTexId) ? linearSampler.HeapIndex : nearestSampler.HeapIndex,
+                        };
+                        cmdList.PushConstants({ pars, offsetof(shader::ImGuiDrawParams, Texture), sizeof(pars) });
                     }
-
-                    cmdList.DrawIndexed(*_pipeline, {
+                    cmdList.DrawIndexed(*Pipeline, {
                         .NumIndices = cmd.ElemCount,
                         .IndexOffset = (uint32_t)indexSpan.offset() + cmd.IdxOffset,
                         .VertexOffset = (uint32_t)vertexSpan.offset() + cmd.VtxOffset,
@@ -241,7 +255,38 @@ public:
             indexSpan.bump_write(draw_list->IdxBuffer.Data, (size_t)draw_list->IdxBuffer.Size);
         }
         renderBuffer->Flush(0, VK_WHOLE_SIZE);
+
+        ImGui::GetPlatformIO().Renderer_RenderState = nullptr;
     }
+
+    // Get ImGui texture ID. The image *must* be visible to STAGE_FRAGMENT and under READ_ONLY or GENERAL layout
+    // just before the call to Render().
+    static ImTextureID GetTextureID(const havk::Image* image, VkFilter filter = VK_FILTER_LINEAR) {
+        static_assert(alignof(havk::Image) >= 8);
+        HAVK_ASSERT(filter == VK_FILTER_NEAREST || filter == VK_FILTER_LINEAR);
+        return (ImTextureID)image | (uint32_t)filter;
+    }
+    static havk::Image* GetTexturePtr(ImTextureID id) { return (havk::Image*)(id & ~uintptr_t(7)); }
+    static VkFilter GetTextureFilter(ImTextureID id) { return (VkFilter)(id & 1); }
+
+    template<std::invocable<ImDrawData*, havk::CommandList&, VkFormat> TCallback>
+    static void AddShaderCallback(ImDrawList* drawList, TCallback&& cb) {
+        auto cb_ = new TCallback(std::move(cb));
+
+        drawList->AddCallback([](const ImDrawList* drawList, const ImDrawCmd* cmd) {
+            auto* cb_ = (TCallback*)cmd->UserCallbackData;
+            auto state = (RenderState*)ImGui::GetPlatformIO().Renderer_RenderState;
+            (*cb_)(state->DrawData, state->CmdList, state->Instance->OutputFormat);
+            delete cb_;
+        }, cb_);
+        drawList->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
+    }
+
+    struct RenderState {
+        ImGuiRenderer* Instance;
+        ImDrawData* DrawData;
+        havk::CommandList& CmdList;
+    };
 
 private:
     void BindRenderState(ImDrawData* draw_data, havk::CommandList& cmdList, int fb_width, int fb_height, havk::Buffer& renderBuffer) {
@@ -276,12 +321,12 @@ private:
             };
             if (tex->Format == ImTextureFormat_Alpha8) memcpy(desc.ChannelSwizzle, "111R", 4);
 
-            auto backend_tex = _device->CreateImage(desc);
-            tex->SetTexID((ImTextureID)backend_tex.release());
+            auto backend_tex = Device->CreateImage(desc);
+            tex->SetTexID(GetTextureID(backend_tex.release()));
         }
 
         if (tex->Status == ImTextureStatus_WantCreate || tex->Status == ImTextureStatus_WantUpdates) {
-            auto backend_tex = (havk::Image*)tex->GetTexID();
+            auto backend_tex = GetTexturePtr(tex->GetTexID());
 
             // Update full texture or selected blocks. We only ever write to textures regions which have never been used before!
             // This backend choose to use tex->UpdateRect but you can use tex->Updates[] to upload individual regions.
@@ -294,7 +339,7 @@ private:
             // Create the Upload Buffer
             int upload_pitch = upload_w * tex->BytesPerPixel;
             uint32_t upload_size = (uint32_t)(upload_h * upload_pitch);
-            auto upload_buffer = _device->CreateBuffer(upload_size, havk::BufferFlags::HostMem_SeqWrite);
+            auto upload_buffer = Device->CreateBuffer(upload_size, havk::BufferFlags::HostMem_SeqWrite);
 
             // Upload to Buffer
             for (int y = 0; y < upload_h; y++) {
@@ -302,7 +347,7 @@ private:
             }
 
             // Copy to Image
-            auto cmdList = _device->CreateCommandList();
+            auto cmdList = Device->CreateCommandList();
             cmdList->CopyBufferToImage({
                 .SrcData = *upload_buffer,
                 .DstImage = *backend_tex,
@@ -318,7 +363,7 @@ private:
         }
 
         if (tex->Status == ImTextureStatus_WantDestroy) {
-            auto backend_tex = (havk::Image*)tex->GetTexID();
+            auto backend_tex = GetTexturePtr(tex->GetTexID());
             havk::Resource::QueuedDeleter{}(backend_tex);
 
             // Clear identifiers and mark as destroyed (in order to allow e.g. calling InvalidateDeviceObjects while running)

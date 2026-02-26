@@ -60,7 +60,7 @@ elseif (CMAKE_HOST_LINUX)
 endif()
 
 if (HAVK_ENABLE_GFX_EXTENSIONS)
-    CPMAddPackage("gh:ocornut/imgui#v1.92.5-docking")
+    CPMAddPackage("gh:ocornut/imgui#v1.92.6-docking")
     CPMAddPackage("gh:epezent/implot#v0.17")
 
     add_library(imgui STATIC
@@ -88,11 +88,6 @@ if (HAVK_ENABLE_GFX_EXTENSIONS)
 
         target_sources(imgui PRIVATE ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp)
         target_link_libraries(imgui PUBLIC glfw)
-
-        # Needed since v1.92.4 for ImGui_ImplGlfw_SetWindowFloating()
-        if (CMAKE_HOST_LINUX)
-            target_link_libraries(imgui PRIVATE X11)
-        endif()
     endif()
 endif()
 
