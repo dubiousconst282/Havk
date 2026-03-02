@@ -11,6 +11,7 @@ struct Camera {
     struct InputState {
         glm::vec3 DeltaMovement = {};   // X: -left +right, Z: -forward +backward, Y: +up -down
         glm::vec2 DeltaRotation = {};   // Change in yaw and pitch.
+        bool IsPanning = false;         // In arcball mode, use `DeltaRotation` for panning instead of rotation.
         float DeltaTime = 0;
         float MouseWheel = 0;           // For zooming in/out in arcball mode.
         glm::vec2 DisplaySize = { 1, 1 };
@@ -32,9 +33,6 @@ struct Camera {
     glm::quat ViewRotation;
 
     glm::mat4 GetViewMatrix(bool translateToOrigin) const {
-        if (Mode == InputMode::Arcball) {
-            return glm::lookAt(ViewPosition, glm::dvec3(0, 0, 0), glm::dvec3(0, 1, 0));
-        }
         glm::mat4 mat = glm::mat4_cast(ViewRotation);
         if (translateToOrigin) mat = glm::translate(mat, glm::vec3(-ViewPosition));
         return mat;
@@ -53,8 +51,8 @@ struct Camera {
 
     // Update camera position and rotation from given inputs.
     void Update(const InputState& inputs, float smoothingDurationMs = 150) {
-        if (inputs.DeltaRotation != glm::vec2(0)) {
-            const float pitchRange = glm::pi<float>() / 2.01f; // a bit less than 90deg to prevent issues with LookAt()
+        if (inputs.DeltaRotation != glm::vec2(0) && !inputs.IsPanning) {
+            const float pitchRange = glm::pi<float>() / 2.0f;
             Euler.x = NormalizeRadians(Euler.x + inputs.DeltaRotation.x);
             Euler.y = glm::clamp(Euler.y + inputs.DeltaRotation.y, -pitchRange, +pitchRange);
         }
@@ -71,12 +69,8 @@ struct Camera {
             glm::vec3 mv = inputs.DeltaMovement * speed;
             Position.y += mv.y; // up/down axis locked
             Position += glm::vec3(mv.x, 0, mv.z) * destRotation;
-        } else if (Mode == InputMode::Arcball) {
-            ArcDistance = glm::max(ArcDistance + inputs.MouseWheel, NearZ);
-            Position = glm::vec3(0, 0, ArcDistance) * destRotation;
-            // TODO: support translation/panning for arcball mode
         }
-        // double smoothingFactor = glm::pow(0.01, 1000.0 / smoothingDurationMs);  // ~1% max dist to target after given duration 
+        // double smoothingFactor = glm::pow(0.01, 1000.0 / smoothingDurationMs);  // ~1% max dist to target after given duration
         // double blend = 1.0 - glm::pow(smoothingFactor, inputs.DeltaTime);       // https://gamedev.stackexchange.com/a/149106
         double blend = 1.0 - glm::pow(0.01, inputs.DeltaTime * (1000.0 / smoothingDurationMs));
 
@@ -86,12 +80,20 @@ struct Camera {
         } else {
             ViewRotation = destRotation;
         }
-        if (smoothingDurationMs > 0 && glm::distance(ViewPosition, Position) > MoveSpeed * 0.0005) {
+
+        if (Mode == InputMode::Arcball) {
+            if (inputs.IsPanning) {
+                float speed = glm::max(ArcDistance, 1.0f) * 0.05f * MoveSpeed;
+                Position += glm::vec3(inputs.DeltaRotation * speed, 0) * ViewRotation;
+            }
+            ArcDistance = glm::max(ArcDistance + inputs.MouseWheel, NearZ);
+            ViewPosition = Position + glm::dvec3(glm::vec3(0, 0, ArcDistance) * ViewRotation);
+        } else if (smoothingDurationMs > 0 && glm::distance(ViewPosition, Position) > MoveSpeed * 0.0005) {
             ViewPosition = glm::mix(ViewPosition, Position, blend);
         } else {
             ViewPosition = Position;
         }
-        
+
         AspectRatio = inputs.DisplaySize.x / inputs.DisplaySize.y;
     }
 #ifdef IMGUI_API
@@ -120,6 +122,7 @@ struct Camera {
             float scale = glm::radians(mouseSensitivity);
             inputs.DeltaRotation.x = io.MouseDelta.x * scale;
             inputs.DeltaRotation.y = -io.MouseDelta.y * scale;
+            inputs.IsPanning = !io.WantCaptureKeyboard && ImGui::IsKeyDown(ImGuiMod_Alt);
         }
         if (!io.WantCaptureMouse) {
             inputs.MouseWheel = io.MouseWheel * mouseSensitivity;
