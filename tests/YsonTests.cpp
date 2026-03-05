@@ -1,5 +1,8 @@
 #include <doctest/doctest.h>
 
+#include <glm/glm.hpp>
+#define YSON_ENABLE_EXTRA_GLM
+#define YSON_ENABLE_EXTRA_STD_UNORDERED_MAP
 #include <Havx/Yson.h>
 #include <limits>
 
@@ -138,4 +141,54 @@ TEST_CASE("writer formatting") {
     // }
     CHECK(resCompact == expCompact);
     CHECK(resFormatted == expFormatted);
+}
+
+TEST_CASE("serializer for std::unordered_map with int/string key") {
+    std::string inputStr = R"({
+        str_map: { hello: 1, world: 2, foo: 3 },
+        int_map: { '10': 'ten', '20': 'twenty', '30': 'thirty' }
+    })";
+    
+    auto rd = yson::Reader(inputStr);
+    rd.ReadExpect(yson::kTypeObject);
+    
+    rd.ReadNext();
+    auto str_map = rd.Parse<std::unordered_map<std::string, int>>();
+    CHECK(str_map["hello"] == 1);
+    CHECK(str_map["world"] == 2);
+    CHECK(str_map["foo"] == 3);
+
+    rd.ReadNext();
+    auto int_map = rd.Parse<std::unordered_map<int, std::string>>();
+    CHECK(int_map[10] == "ten");
+    CHECK(int_map[20] == "twenty");
+    CHECK(int_map[30] == "thirty");
+    
+    yson::Writer wr;
+    wr.BeginObject();
+    wr.Write("str_map", str_map);
+    wr.Write("int_map", int_map);
+    wr.EndObject();
+
+    auto rrd = yson::Reader(wr.Buffer);
+    rrd.ReadNext();
+    rrd.Skip();
+    CHECK(rrd.Pos == rrd.Len);
+}
+
+TEST_CASE("serializer for glm vector") {
+    auto rd = yson::Reader("{ v3i: [1, 2, 3], v3f: [1.2, 3, -4], bad_elem: [3, 4, 'abc'], bad_dim: [1, 2, 3, 4, 5] }");
+    rd.ReadExpect(yson::kTypeObject);
+
+    rd.ReadNext();
+    CHECK_UNARY(rd.Parse<glm::ivec3>() == glm::ivec3(1, 2, 3));
+
+    rd.ReadNext();
+    CHECK_UNARY(rd.Parse<glm::vec3>() == glm::vec3(1.2, 3, -4));
+
+    rd.ReadNext();
+    CHECK_THROWS(rd.Parse<glm::vec3>());
+
+    rd.ReadNext();
+    CHECK_THROWS(rd.Parse<glm::vec3>());
 }

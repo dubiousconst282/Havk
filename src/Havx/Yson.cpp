@@ -343,6 +343,18 @@ void Writer::WriteStr(std::string_view value) {
     Buffer.append("\"");
 }
 
+void Writer::WriteProp(std::string_view key, bool quoted) {
+    assert(_currState == kStateObject);
+    WriteComma();
+
+    if (quoted) {
+        WriteStr(key);
+    } else {
+        Buffer.append(key);
+    }
+    Buffer.append(": ");
+}
+
 void Writer::WriteComma() {
     if (_needsComma) {
         Buffer.append(IndentWidth > 0 || _needsNewLine ? "," : ", ");

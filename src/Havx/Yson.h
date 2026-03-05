@@ -188,11 +188,7 @@ struct Writer {
     void EndObject();
     void EndArray();
 
-    void WriteProp(std::string_view key) {
-        assert(_currState == kStateObject);
-        WriteComma();
-        Buffer.append(key).append(": ");
-    }
+    void WriteProp(std::string_view key, bool quoted = false);
 
     void WriteInt(int64_t value);
     void WriteUInt(uint64_t value, uint32_t base = 10, uint32_t width = 0);
@@ -377,3 +373,79 @@ struct Serializer<T> {
         }                                                       \
         wr.WriteStr(str);                                       \
     }
+
+#ifdef YSON_ENABLE_EXTRA_STD_UNORDERED_MAP
+#include <unordered_map>
+
+template<typename V>
+struct yson::Serializer<std::unordered_map<std::string, V>> {
+    static void Read(Reader& rd, std::unordered_map<std::string, V>& obj) {
+        std::string key;
+        while (rd.ReadNext()) {
+            yson::Unescape(rd.Key, key);
+            Serializer<V>::Read(rd, obj[key]);
+            key.clear();
+        }
+    }
+    static void Write(Writer& wr, const std::unordered_map<std::string, V>& obj) {
+        wr.BeginObject();
+        for (auto& [k, v] : obj) {
+            wr.WriteProp(k, true);
+            Serializer<V>::Write(wr, v);
+        }
+        wr.EndObject();
+    }
+};
+
+template<std::integral K, typename V>
+struct yson::Serializer<std::unordered_map<K, V>> {
+    static void Read(Reader& rd, std::unordered_map<K, V>& obj) {
+        while (rd.ReadNext()) {
+            K key;
+            char* parsedEnd;
+
+            if constexpr (std::is_unsigned_v<K>) {
+                key = static_cast<K>(strtoull(rd.Key.data(), &parsedEnd, 10));
+            } else {
+                key = static_cast<K>(strtoll(rd.Key.data(), &parsedEnd, 10));
+            }
+            if (parsedEnd != rd.Key.data() + rd.Key.size()) {
+                rd.ReportError("Invalid integer key");
+                return;
+            }
+            Serializer<V>::Read(rd, obj[key]);
+        }
+    }
+    static void Write(Writer& wr, const std::unordered_map<K, V>& obj) {
+        wr.BeginObject();
+        for (auto& [k, v] : obj) {
+            wr.WriteProp(std::to_string(k), true);
+            Serializer<V>::Write(wr, v);
+        }
+        wr.EndObject();
+    }
+};
+#endif
+
+#ifdef YSON_ENABLE_EXTRA_GLM
+#include <glm/fwd.hpp>
+
+template<typename T, int L>
+struct yson::Serializer<glm::vec<L, T>> {
+    static void Read(Reader& rd, glm::vec<L, T>& v) {
+        for (int i = 0; i < L; i++) {
+            rd.ReadExpect(yson::kTypeNumber);
+            v[i] = T(rd.GetNum());
+        }
+        if (rd.ReadNext()) rd.ReportError("Invalid data found after parsing vector");
+    }
+    static void Write(Writer& wr, const glm::vec<L, T>& v) {
+        uint32_t oldIndent = wr.IndentWidth;
+        wr.IndentWidth = 0;
+        wr.BeginArray();
+        for (int i = 0; i < L; i++) wr.WriteNum(double(v[i]));
+        wr.EndArray();
+        wr.IndentWidth = oldIndent;
+    }
+};
+#endif
