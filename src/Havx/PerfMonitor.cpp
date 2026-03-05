@@ -705,9 +705,9 @@ struct PerfmonContext {
     }
 
     void SaveOrLoadSettings(bool save) {
-        std::string path = ImGui::GetIO().IniFilename;
-        if (path.empty()) return;
+        if (ImGui::GetIO().IniFilename == nullptr) return;
 
+        std::string path = ImGui::GetIO().IniFilename;
         while (!path.empty() && path.back() != '/' && path.back() != '\\') path.pop_back();
         path += "havk_perfmon_state.txt";
 

@@ -192,6 +192,7 @@ struct ImGuiRenderer {
             .minFilter = VK_FILTER_LINEAR,
             .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
             .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+            .maxLod = 1.0f,
             .borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,
         });
 
@@ -206,36 +207,36 @@ struct ImGuiRenderer {
 
         for (const ImDrawList* draw_list : draw_data->CmdLists) {
             for (const ImDrawCmd& cmd : draw_list->CmdBuffer) {
+                // Project scissor/clipping rectangles into framebuffer space
+                ImVec2 clip_min((cmd.ClipRect.x - clip_off.x) * clip_scale.x, (cmd.ClipRect.y - clip_off.y) * clip_scale.y);
+                ImVec2 clip_max((cmd.ClipRect.z - clip_off.x) * clip_scale.x, (cmd.ClipRect.w - clip_off.y) * clip_scale.y);
+
+                // Clamp to viewport as vkCmdSetScissor() won't accept values that are off bounds
+                if (clip_min.x < 0.0f) clip_min.x = 0.0f;
+                if (clip_min.y < 0.0f) clip_min.y = 0.0f;
+                if (clip_max.x > fb_width) clip_max.x = (float)fb_width;
+                if (clip_max.y > fb_height) clip_max.y = (float)fb_height;
+                if (clip_max.x <= clip_min.x || clip_max.y <= clip_min.y) continue;
+
+                // Apply scissor/clipping rectangle
+                cmdList.SetScissor({
+                    (int32_t)clip_min.x,
+                    (int32_t)clip_min.y,
+                    (uint32_t)(clip_max.x - clip_min.x),
+                    (uint32_t)(clip_max.y - clip_min.y),
+                });
+
                 if (cmd.UserCallback != nullptr) {
                     // User callback, registered via ImDrawList::AddCallback()
-                    // (ImDrawCallback_ResetRenderState is a special callback value used by the user to request the renderer to reset render
-                    // state.)
-                    if (cmd.UserCallback == ImDrawCallback_ResetRenderState) {
-                        BindRenderState(draw_data, cmdList, fb_width, fb_height, *renderBuffer);
-                        currTexId = 0;
-                    } else {
+                    // We behave slightly differently from standard ImGui backends to improve consistency:
+                    // - Interleaving with other commands will ~randomly break scissor rect, always set it beforehand
+                    // - User will amost always need to emit ResetState, always reset afterwards
+                    if (cmd.UserCallback != ImDrawCallback_ResetRenderState) {
                         cmd.UserCallback(draw_list, &cmd);
                     }
+                    BindRenderState(draw_data, cmdList, fb_width, fb_height, *renderBuffer);
+                    currTexId = 0;
                 } else {
-                    // Project scissor/clipping rectangles into framebuffer space
-                    ImVec2 clip_min((cmd.ClipRect.x - clip_off.x) * clip_scale.x, (cmd.ClipRect.y - clip_off.y) * clip_scale.y);
-                    ImVec2 clip_max((cmd.ClipRect.z - clip_off.x) * clip_scale.x, (cmd.ClipRect.w - clip_off.y) * clip_scale.y);
-
-                    // Clamp to viewport as vkCmdSetScissor() won't accept values that are off bounds
-                    if (clip_min.x < 0.0f) clip_min.x = 0.0f;
-                    if (clip_min.y < 0.0f) clip_min.y = 0.0f;
-                    if (clip_max.x > fb_width) clip_max.x = (float)fb_width;
-                    if (clip_max.y > fb_height) clip_max.y = (float)fb_height;
-                    if (clip_max.x <= clip_min.x || clip_max.y <= clip_min.y) continue;
-
-                    // Apply scissor/clipping rectangle
-                    cmdList.SetScissor({
-                        (int32_t)clip_min.x,
-                        (int32_t)clip_min.y,
-                        (uint32_t)(clip_max.x - clip_min.x),
-                        (uint32_t)(clip_max.y - clip_min.y),
-                    });
-
                     if (cmd.GetTexID() != currTexId) {
                         currTexId = cmd.GetTexID();
                         uint32_t pars[] = {
@@ -279,7 +280,6 @@ struct ImGuiRenderer {
             (*cb_)(state->DrawData, state->CmdList, state->Instance->OutputFormat);
             delete cb_;
         }, cb_);
-        drawList->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
     }
 
     struct RenderState {

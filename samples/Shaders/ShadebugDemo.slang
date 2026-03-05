@@ -149,8 +149,8 @@ void CS_ComposeDebug(
             float3 m = pow(abs(normal), 20.0);
             color.rgb *= (c.x * m.x + c.y * m.y + c.z * m.z) / (m.x + m.y + m.z);
         }
-        color.rgb *= max(0.1, dot(normal, normalize(float3(-0.2, 1.0, 0.8)))) +
-                     max(0.1, dot(normal, normalize(float3(0.2, -0.3, -0.8))));
+        float NoL = dot(normal, normalize(float3(-0.2, 1.0, 0.8)));
+        color.rgb *= pow(NoL * 0.3 + 0.7, 2);
     }
     colorBuffer.Store(screenPos, color);
 }

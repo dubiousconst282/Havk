@@ -6,6 +6,9 @@
 #include "ShaderDebugTools.h"
 #include "ImGuiRenderer.h"
 #include "SystemUtils.h"
+
+#define YSON_ENABLE_EXTRA_STD_UNORDERED_MAP
+#define YSON_ENABLE_EXTRA_GLM
 #include "Yson.h"
 
 #include "Shaders/Havk/DebugTools.h"
@@ -315,17 +318,24 @@ struct ShapeBuilder {
 struct ImageViewerState {
     enum DisplayFlags {
         R = 1, G = 2, B = 4, A = 8,
-        Luma = 16, Gamma = 32,
+        Luma = 1 << 4, Gamma = 1 << 5,
+
+        DiffShift_ = 6, DiffMask_ = 3 << DiffShift_,
+        DiffSwipe = 1 << DiffShift_, DiffOverlay = 2 << DiffShift_, DiffAbs = 3 << DiffShift_,
+
         RGBA = R | G | B | A,
     };
     int Flags = R | G | B | Gamma;
     float2 ColorRange = float2(0, 1);
+    float DiffCutoff = 0.5f; // swipe cutoff / opacity
     float2 ViewPos = float2(0);
     float ViewSize = 1;
-    bool PoppedOut = false;
-    int LastUsedFrame = 0;
 
+    bool IsHeaderOpen = true;
+    bool IsPoppedOut = false;
+    int LastUsedFrame = 0;
     havk::ImagePtr Canvas;
+    havk::ImagePtr DiffRefCanvas;
 };
 
 struct ShadebugContext {
@@ -342,13 +352,13 @@ struct ShadebugContext {
 
     ImVec2 MouseLastDownPos, MouseLastClickedPos, MouseLastReleasedPos;
 
-    int2 PickerSelectedPos = { 0, 0 };
+    int2 PickerSelectedTID = { INT_MIN, 0 };
     int2 PickerDragOrigin = { 0, 0 };
     bool ShowPicker = false;
     bool PauseFrame = false;
     shbind::FrameDebugContext PausedFrameCtx = {};
 
-    std::unordered_map<uint32_t, ImageViewerState> ActiveImagePlots;
+    std::unordered_map<uint32_t, ImageViewerState> ImagePlots;
     havk::GraphicsPipelinePtr ImageViewerPipeline;
 
     ShadebugContext(havk::DeviceContext* device) : Device(device) {
@@ -449,7 +459,7 @@ struct ShadebugContext {
 
     void NewFrame(havk::CommandList& cmds) {
         shbind::FrameDebugContext ctx = {};
-        ctx.SelectedTID = uint16_t2(PickerSelectedPos);
+        ctx.SelectedTID = uint16_t2(PickerSelectedTID);
         ctx.EnableOncePID = UINT32_MAX;
         ctx.WantPauseAfterFrame = false;
 
@@ -519,6 +529,7 @@ struct ShadebugContext {
 
         if (ImGui::Button("Reset Widgets")) {
             memset(widgetKeys.data(), 0, widgetKeys.size_bytes());
+            ImagePlots.clear();
         }
 
         bool wasPaused = PauseFrame;
@@ -540,15 +551,15 @@ struct ShadebugContext {
         }
 
         ImGui::SetNextItemWidth(6 * ImGui::GetFontSize());
-        ImGui::DragInt2("Selected TID", &PickerSelectedPos.x, 0.5f);
+        ImGui::DragInt2("Selected TID", &PickerSelectedTID.x, 0.5f);
 
         if (pars.PickImage != nullptr) {
             ImGui::SameLine();
             ImGui::SetNextItemShortcut(ImGuiMod_Ctrl | ImGuiKey_G, ImGuiInputFlags_RouteGlobal | ImGuiInputFlags_Tooltip);
             ImGui::Checkbox("Show Picker", &ShowPicker);
 
-            if (ctx.FrameCount == 0) {
-                PickerSelectedPos = int2(pars.PickImage->Size / 2u);
+            if (PickerSelectedTID.x == INT_MIN) {
+                PickerSelectedTID = int2(pars.PickImage->Size / 2u);
             }
             const int numCells = kPickerGridSize - 1 + (kPickerGridSize % 2);
             const int radius = numCells / 2;
@@ -559,7 +570,7 @@ struct ShadebugContext {
             cmds.Dispatch<shbind::CS_CopyImageToRGBA8>({ kPickerGridSize, kPickerGridSize, 1 }, {
                 .srcImage = *pars.PickImage,
                 .dstBuffer = pixelPickData,
-                .srcRect = { PickerSelectedPos.x - radius, PickerSelectedPos.y - radius, kPickerGridSize, kPickerGridSize },
+                .srcRect = { PickerSelectedTID.x - radius, PickerSelectedTID.y - radius, kPickerGridSize, kPickerGridSize },
                 .dstStride = kPickerGridSize,
             });
         }
@@ -702,14 +713,14 @@ struct ShadebugContext {
             ImGui::EndChild();
         }
 
-        for (auto& [widgetId, viewer] : ActiveImagePlots) {
+        for (auto& [widgetId, viewer] : ImagePlots) {
             if (viewer.Canvas && ImGui::GetFrameCount() - viewer.LastUsedFrame >= 2) {
                 viewer.Canvas = nullptr;
             }
         }
 
         ImGuiViewport* viewport = ImGui::GetMainViewport();
-        ImVec2 selectedPos = viewport->Pos + ImVec2(PickerSelectedPos.x, PickerSelectedPos.y);
+        ImVec2 selectedPos = viewport->Pos + ImVec2(PickerSelectedTID.x, PickerSelectedTID.y);
 
         if (pars.PickImage != nullptr) {
             ImDrawList* bgdl = ImGui::GetBackgroundDrawList(viewport);
@@ -754,7 +765,7 @@ struct ShadebugContext {
                 dl->AddRect(centerPos - ImVec2(1, 1), centerPos + ImVec2(sq + 2, sq + 2), IM_COL32(br, br, br, 120), 2.0f);
 
                 char centerText[32];
-                snprintf(centerText, sizeof(centerText), "%d %d", PickerSelectedPos.x, PickerSelectedPos.y);
+                snprintf(centerText, sizeof(centerText), "%d %d", PickerSelectedTID.x, PickerSelectedTID.y);
                 ImVec2 textOffset = ImVec2((sq - ImGui::CalcTextSize(centerText).x) / 2, sq);
                 dl->AddText(centerPos + textOffset, IM_COL32(br, br, br, 255), centerText);
 
@@ -763,22 +774,22 @@ struct ShadebugContext {
                 // Dragging behaviors
                 if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) &&
                     !ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)) {
-                    PickerSelectedPos.x = mousePos.x - viewport->Pos.x;
-                    PickerSelectedPos.y = mousePos.y - viewport->Pos.y;
+                    PickerSelectedTID.x = mousePos.x - viewport->Pos.x;
+                    PickerSelectedTID.y = mousePos.y - viewport->Pos.y;
                 } else if (ImGui::IsItemClicked()) {
                     ImVec2 reloc = (mousePos - centerPos) / sq;
-                    PickerSelectedPos.x += reloc.x;
-                    PickerSelectedPos.y += reloc.y;
+                    PickerSelectedTID.x += reloc.x;
+                    PickerSelectedTID.y += reloc.y;
                 } else if (ImGui::IsMouseDragging(ImGuiMouseButton_Left) && ImGui::IsWindowFocused()) {
                     ImVec2 delta = ImGui::GetMouseDragDelta() * 0.25f;
-                    PickerSelectedPos.x = PickerDragOrigin.x + (int)delta.x;
-                    PickerSelectedPos.y = PickerDragOrigin.y + (int)delta.y;
+                    PickerSelectedTID.x = PickerDragOrigin.x + (int)delta.x;
+                    PickerSelectedTID.y = PickerDragOrigin.y + (int)delta.y;
                     ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
                 } else {
-                    PickerDragOrigin = PickerSelectedPos;
+                    PickerDragOrigin = PickerSelectedTID;
                 }
-                PickerSelectedPos.x = std::min(std::max(PickerSelectedPos.x, 0), (int)pars.PickImage->Size.x);
-                PickerSelectedPos.y = std::min(std::max(PickerSelectedPos.y, 0), (int)pars.PickImage->Size.y);
+                PickerSelectedTID.x = std::min(std::max(PickerSelectedTID.x, 0), (int)pars.PickImage->Size.x);
+                PickerSelectedTID.y = std::min(std::max(PickerSelectedTID.y, 0), (int)pars.PickImage->Size.y);
 
                 if (ImGui::IsWindowHovered() && !ImGui::IsItemHovered()) {
                     ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
@@ -900,7 +911,7 @@ struct ShadebugContext {
                 break;
             }
             case CommandType::UI_PlotImage: {
-                ImageViewerState* viewer = &ActiveImagePlots[widget.Label];
+                ImageViewerState* viewer = &ImagePlots[widget.Label ^ (uint32_t)(uintptr_t)&widget];
 
                 uint2 size = uint2(widget.Params[0], widget.Params[1]);
                 bool visible = DrawImageViewer(label, viewer, size);
@@ -919,33 +930,33 @@ struct ShadebugContext {
 
     // TODO-MAYBE: refactor & expose this to take arbitrary images?
     bool DrawImageViewer(const char* label, ImageViewerState* state, uint2 imageSize) {
-        const auto headerFlags = ImGuiTreeNodeFlags_CollapsingHeader | ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_AllowOverlap;
-        bool headerOpen = ImGui::TreeNodeEx(label, headerFlags, "");
+        ImGui::SetNextItemOpen(state->IsHeaderOpen, ImGuiCond_Appearing);
+        state->IsHeaderOpen = ImGui::TreeNodeEx(label, ImGuiTreeNodeFlags_CollapsingHeader | ImGuiTreeNodeFlags_AllowOverlap, "");
 
         ImGui::SameLine(0, 0);
         {
             float btnSize = ImGui::GetFrameHeight();
-            if (ImGui::InvisibleButton("##popout", ImVec2(btnSize, btnSize))) state->PoppedOut ^= true;
+            if (ImGui::InvisibleButton("##popout", ImVec2(btnSize, btnSize))) state->IsPoppedOut ^= true;
 
             ImDrawList* dl = ImGui::GetWindowDrawList();
             float iconSize = ImGui::GetFontSize();
             float center = ImMax(0.0f, (btnSize - iconSize) * 0.5f);
 
-            if (ImGui::IsItemHovered()) {
+            if (ImGui::IsItemHovered() || state->IsPoppedOut) {
                 dl->AddRectFilled(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), ImGui::GetColorU32(ImGuiCol_FrameBgHovered));
             }
             ImGui::RenderArrowDockMenu(dl, ImGui::GetItemRectMin() + ImVec2(center, center), iconSize, ImGui::GetColorU32(ImGuiCol_Text));
         }
         ImGui::SameLine();
-        ImGui::TextUnformatted(label);
+        ImGui::Text("%s (%dx%d)", label, imageSize.x, imageSize.y);
 
-        if (!headerOpen && !state->PoppedOut) return false;
+        if (!state->IsHeaderOpen && !state->IsPoppedOut) return false;
         
-        bool ownWindow = state->PoppedOut;
+        bool ownWindow = state->IsPoppedOut;
         if (ownWindow) {
             char title[256];
             snprintf(title, sizeof(title), "Image Viewer: %s", label);
-            ImGui::Begin(title, &state->PoppedOut);
+            ImGui::Begin(title, &state->IsPoppedOut);
         }
 
         for (uint32_t i = 0; i < 4; i++) {
@@ -963,7 +974,13 @@ struct ShadebugContext {
             ImGui::PopStyleColor(3);
 
             if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
-                state->Flags ^= ImageViewerState::RGBA & ~(1 << i);
+                int otherChannels = ImageViewerState::RGBA & ~(1 << i);
+
+                if (state->Flags & otherChannels) {
+                    state->Flags &= ~otherChannels;
+                } else {
+                    state->Flags |= otherChannels;
+                }
             }
         }
 
@@ -980,19 +997,13 @@ struct ShadebugContext {
 
         ImGui::SameLine();
 
-        float unitWidth = ImGui::CalcTextSize("0").x;
-        ImGui::SetNextItemWidth(unitWidth * 16);
+        float charWidth = ImGui::CalcTextSize("0").x;
+        ImGui::SetNextItemWidth(charWidth * 16);
         ImGui::DragFloatRange2("Range", &state->ColorRange.x, &state->ColorRange.y, 0.05f, 0, 0, "%g");
-
-        ImGui::SameLine();
-        ImGui::CheckboxFlags("Gamma", &state->Flags, ImageViewerState::Gamma);
-
-        if (ownWindow) {
-            // TODO: image diffing (abs delta, swipe)?
-        }
+        if (state->ColorRange.x == state->ColorRange.y) state->ColorRange.y = state->ColorRange.x + 0.0001f;
 
         ImVec2 previewSize = ImGui::GetContentRegionAvail();
-        previewSize.y = std::max(previewSize.y, std::min(200.0f, (float)imageSize.y));
+        if (!ownWindow) previewSize.y = ImGui::GetWindowSize().y * 0.75f;
 
         float imageRatio = imageSize.x / (float)imageSize.y;
         float previewRatio = previewSize.x / previewSize.y;
@@ -1004,16 +1015,18 @@ struct ShadebugContext {
         }
 
         bool visible = ImGui::BeginChild("ImageArea", previewSize, 0, ImGuiWindowFlags_NoMove);
+        ImVec2 previewPos = ImGui::GetCursorScreenPos();
 
         if (visible) {
+            ImGui::OpenPopupOnItemClick("CtxMenu");
+
             ImGuiIO& io = ImGui::GetIO();
-            ImVec2 screenPos = ImGui::GetCursorScreenPos();
 
             if (ImGui::IsWindowHovered()) {
                 ImGui::SetKeyOwner(ImGuiKey_MouseWheelY, ImGui::GetItemID());
 
                 if (io.MouseWheel != 0 && (io.MouseWheel < 0 || state->ViewSize > 1e-3f)) {
-                    ImVec2 center = (io.MousePos - screenPos) / previewSize;
+                    ImVec2 center = (io.MousePos - previewPos) / previewSize;
                     float zoom = state->ViewSize * (io.MouseWheel * 0.15f);
 
                     state->ViewPos += float2(center.x, center.y) * zoom;
@@ -1024,6 +1037,10 @@ struct ShadebugContext {
                 float2 delta = float2(io.MouseDelta.x / previewSize.x, io.MouseDelta.y / previewSize.y);
                 state->ViewPos -= state->ViewSize * delta;
             }
+            if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left, ImGui::GetItemID())) {
+                state->ViewPos = float2(0);
+                state->ViewSize = 1;
+            }
             state->ViewPos = glm::clamp(state->ViewPos, 0.0f, 1.0f - state->ViewSize);
 
             if (state->Canvas == nullptr || state->Canvas->Size != uint3(imageSize, 1)) {
@@ -1031,10 +1048,11 @@ struct ShadebugContext {
                     .Format = VK_FORMAT_R16G16B16A16_SFLOAT,
                     .Usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                     .Size = uint3(imageSize, 1),
-                });
+                }, havk::DebugLabel("shdbg-%s", label));
             }
+            ImDrawList* dl = ImGui::GetWindowDrawList();
 
-            havx::ImGuiRenderer::AddShaderCallback(ImGui::GetWindowDrawList(), [=, this](ImDrawData* drawData, havk::CommandList& cmdList, VkFormat format) {
+            havx::ImGuiRenderer::AddShaderCallback(dl, [=, this](ImDrawData* drawData, havk::CommandList& cmdList, VkFormat format) {
                 if (!state->Canvas) return;
 
                 if (ImageViewerPipeline == nullptr) {
@@ -1048,27 +1066,85 @@ struct ShadebugContext {
                 }
 
                 ImVec2 clipScale = ImVec2(2.0f, 2.0f) / drawData->DisplaySize;
-                ImVec2 clipOffset = (screenPos - drawData->DisplayPos) * clipScale - ImVec2(1.0f, 1.0f);
+                ImVec2 clipOffset = (previewPos - drawData->DisplayPos) * clipScale - ImVec2(1.0f, 1.0f);
 
                 shbind::ImageViewerParams pc = {
                     .SrcImage = *state->Canvas,
+                    .RefImage = state->DiffRefCanvas ? *state->DiffRefCanvas : havk::ImageHandle(),
                     .Sampler = Device->DescriptorHeap->GetSampler({
                         .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
                         .magFilter = VK_FILTER_NEAREST,
                         .minFilter = VK_FILTER_LINEAR,
                         .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
                         .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+                        .maxLod = 1.0f,
                         .borderColor = VK_BORDER_COLOR_INT_TRANSPARENT_BLACK,
                     }),
                     .Flags = (uint32_t)state->Flags,
                     .ColorRange = GetRangeRemapCoeffs(state->ColorRange.x, state->ColorRange.y),
+                    .DiffCutoff = state->DiffCutoff,
                     .SrcRect = float4(state->ViewPos, state->ViewSize, state->ViewSize),
                     .ClipRect = float4(clipOffset.x, clipOffset.y, previewSize.x * clipScale.x, previewSize.y * clipScale.y),
                 };
                 cmdList.Draw(*ImageViewerPipeline, { .NumVertices = 6 }, pc);
             });
+
+            if ((state->Flags & ImageViewerState::DiffMask_) == ImageViewerState::DiffSwipe) {
+                float tCutoffImage = (state->DiffCutoff - state->ViewPos.x) / state->ViewSize;
+                float xo = floor(previewPos.x + previewSize.x * tCutoffImage);
+                dl->AddLine(ImVec2(xo, previewPos.y), ImVec2(xo, previewPos.y + previewSize.y), 0x77FFFFFF, 3.0f);
+                dl->AddLine(ImVec2(xo, previewPos.y), ImVec2(xo, previewPos.y + previewSize.y), 0xAA000000, 1.0f);
+
+                ImGui::SetCursorScreenPos(ImVec2(xo - charWidth, previewPos.y));
+                ImGui::InvisibleButton("##SwipeHandle", ImVec2(charWidth * 2, previewSize.y));
+
+                if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+                    float tCutoffPreview = (ImGui::GetMousePos().x - previewPos.x) / previewSize.x;
+                    state->DiffCutoff = glm::clamp(state->ViewPos.x + tCutoffPreview * state->ViewSize, 0.0f, 1.0f);
+                }
+                if (ImGui::IsItemActive() || ImGui::IsItemHovered()) {
+                    ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+                }
+                if (ImGui::IsWindowFocused()) {
+                    ImGui::SetKeyOwner(ImGuiKey_Tab, ImGui::GetItemID());
+                    if (ImGui::IsKeyPressed(ImGuiKey_Tab)) {
+                        state->DiffCutoff = state->DiffCutoff > 0.5f ? 0.0 : 1.0f;
+                    }
+                }
+            }
         }
         ImGui::EndChild();
+
+        bool wantSaveDiffRef = false;
+
+        if (ImGui::BeginPopupContextItem("CtxMenu")) {
+            ImGui::CheckboxFlags("Gamma", &state->Flags, ImageViewerState::Gamma);
+
+            int diffMode = (state->Flags & ImageViewerState::DiffMask_) >> ImageViewerState::DiffShift_;
+            bool wasDisabled = diffMode == 0;
+            ImGui::SetNextItemWidth(12 * charWidth);
+
+            if (ImGui::Combo("Diffing", &diffMode, "Disabled\0Swipe\0Overlay\0Abs Diff\0")) {
+                state->Flags = (state->Flags & ~ImageViewerState::DiffMask_) | (diffMode << ImageViewerState::DiffShift_);
+                state->DiffCutoff = 0.5f;
+                wantSaveDiffRef |= wasDisabled && diffMode != 0;
+            }
+            if (diffMode != 0) {
+                ImGui::TextDisabled("Alt+C: save ref");
+            }
+            ImGui::EndPopup();
+        }
+
+        if (state->Flags & ImageViewerState::DiffMask_) {
+            wantSaveDiffRef |= ImGui::Shortcut(ImGuiMod_Alt | ImGuiKey_C, ImGuiInputFlags_RouteGlobal);
+
+            if (wantSaveDiffRef) {
+                state->DiffRefCanvas = std::move(state->Canvas);
+            }
+        } else if (state->DiffRefCanvas != nullptr) {
+            state->DiffRefCanvas = nullptr;
+        }
+        // TODO-MAYBE: save/load image to file
 
         if (ownWindow) ImGui::End();
 
@@ -1267,13 +1343,38 @@ Err:
 
 static ShadebugContext* g_ctx = nullptr;
 
+static void SaveOrLoadSettings(bool save) {
+    if (ImGui::GetIO().IniFilename == nullptr) return;
+
+    std::string path = ImGui::GetIO().IniFilename;
+    while (!path.empty() && path.back() != '/' && path.back() != '\\') path.pop_back();
+
+    path += "shadebug_settings.yson";
+
+    if (save) {
+        auto wr = yson::Writer();
+        wr.Write(*g_ctx);
+        havx::WriteFileBytes(path, wr.Buffer.data(), wr.Buffer.size(), true);
+    } else {
+        auto buffer = havx::ReadFileBytes(path);
+        auto rd = yson::Reader(std::string_view((char*)buffer.data(), buffer.size()));
+
+        if (buffer.empty() || !rd.ReadNext()) return;
+        rd.Parse(*g_ctx);
+    }
+}
+
 void Shadebug::Initialize(havk::DeviceContext* ctx) {
     HAVK_ASSERT(!g_ctx || g_ctx->Device == ctx);
-    if (!g_ctx) g_ctx = new ShadebugContext(ctx);
+    if (!g_ctx) {
+        g_ctx = new ShadebugContext(ctx);
+        SaveOrLoadSettings(false);
+    }
 }
 void Shadebug::Shutdown() {
     if (!g_ctx) return;
 
+    SaveOrLoadSettings(true);
     delete g_ctx;
     g_ctx = nullptr;
 }
@@ -1287,3 +1388,6 @@ void Shadebug::DrawFrame(havk::CommandList& cmds, const DrawFrameParams& pars) {
 }
 
 };  // namespace havx
+
+YSON_SERIALIZER_STRUCT_INLINE(havx::ImageViewerState, Flags, ColorRange, DiffCutoff, ViewPos, ViewSize, IsHeaderOpen, IsPoppedOut);
+YSON_SERIALIZER_STRUCT_INLINE(havx::ShadebugContext, PickerSelectedTID, ImagePlots);

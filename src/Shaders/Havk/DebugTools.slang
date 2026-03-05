@@ -711,7 +711,17 @@ void FS_DrawSphere(
     outNormal.w = 1;
 }
 
-// Custom copy shader because vkCopyImageToBuffer doesn't support format conversion.
+// https://iquilezles.org/articles/intersectors
+float2 RayIntersectSphere(float3 origin, float3 dir, float3 center, float radius) {
+    float3 oc = origin - center;
+    float b = dot(oc, dir);
+    float c = dot(oc, oc) - radius * radius;
+    float h = b * b - c;
+    if (h < 0.0) return -1.0;
+    h = sqrt(h);
+    return float2(-b - h, -b + h);
+}
+
 [numthreads(8, 8)]
 void CS_CopyImageToRGBA8(
     uniform TextureHandle2D<float4> srcImage, uniform uint32_t* dstBuffer,
@@ -727,14 +737,19 @@ void CS_CopyImageToRGBA8(
 
 enum ImageViewerFlags {
     R = 1, G = 2, B = 4, A = 8,
-    Luma = 16, Gamma = 32,
+    Luma = 1 << 4, Gamma = 1 << 5,
+
+    DiffShift_ = 6, DiffMask_ = 3 << (int)DiffShift_,
+    DiffSwipe = 1 << (int)DiffShift_, DiffOverlay = 2 << (int)DiffShift_, DiffAbs = 3 << (int)DiffShift_,
 };
 
 struct ImageViewerParams {
     TextureHandle2D<float4> SrcImage;
+    TextureHandle2D<float4> RefImage;
     SamplerHandle Sampler;
     uint Flags;
     float2 ColorRange;
+    float DiffCutoff;
     float4 SrcRect;
     float4 ClipRect;
 };
@@ -748,8 +763,17 @@ void VS_ImageViewer(uniform ImageViewerParams pc, uint vertexId: SV_VertexID,
     texcoord = uv * pc.SrcRect.zw + pc.SrcRect.xy;
 }
 [shader("fragment")]
-float4 FS_ImageViewer(uniform ImageViewerParams pc, float2 texcoord, int2 screenPos : SV_Position) {
+float4 FS_ImageViewer(uniform ImageViewerParams pc, float2 texcoord, int2 screenPos: SV_Position) {
     float4 color = pc.SrcImage.Sample(pc.Sampler, texcoord);
+
+    if (pc.RefImage) {
+        float4 refColor = pc.RefImage.Sample(pc.Sampler, texcoord);
+
+        uint mode = pc.Flags & ImageViewerFlags.DiffMask_;
+        if (mode == ImageViewerFlags.DiffOverlay) color = lerp(refColor, color, pc.DiffCutoff);
+        if (mode == ImageViewerFlags.DiffSwipe) color = (texcoord.x < pc.DiffCutoff) ? refColor : color;
+        if (mode == ImageViewerFlags.DiffAbs) color = abs(color - refColor);
+    }
 
     color = color * pc.ColorRange.x + pc.ColorRange.y;
 
@@ -759,6 +783,9 @@ float4 FS_ImageViewer(uniform ImageViewerParams pc, float2 texcoord, int2 screen
     if ((flags & ImageViewerFlags.B) == 0) color.b = 0;
     if ((flags & ImageViewerFlags.A) == 0) color.a = 1;
 
+    float checker = ((screenPos.x ^ screenPos.y) & 32) != 0 ? 1 : 0.75;
+    if (any(isnan(color.rgba) || isinf(color.rgba))) return float4(checker, 0, checker, 1);
+
     if ((flags & ImageViewerFlags.Gamma) == 0) {
         color.rgb = havk::colorutils::sRGB_from_Linear(color.rgb);
     }
@@ -767,47 +794,9 @@ float4 FS_ImageViewer(uniform ImageViewerParams pc, float2 texcoord, int2 screen
         if ((flags & ImageViewerFlags.A) == 0) color.a = 0;
         color.rgb = dot(color, 1);
     } else {
-        float checker = ((screenPos.x ^ screenPos.y) & 32) != 0 ? 1 : 0.75;
         color.rgb = lerp(checker, color.rgb, color.a);
     }
     return float4(color.rgb, 1);
-}
-
-// https://iquilezles.org/articles/intersectors
-float2 RayIntersectSphere(float3 origin, float3 dir, float3 center, float radius) {
-    float3 oc = origin - center;
-    float b = dot(oc, dir);
-    float c = dot(oc, oc) - radius * radius;
-    float h = b * b - c;
-    if (h < 0.0) return -1.0;
-    h = sqrt(h);
-    return float2(-b - h, -b + h);
-}
-float RayIntersectCapsule(float3 origin, float3 dir, float3 pa, float3 pb, float ra) {
-    float3 ba = pb - pa;
-    float3 oa = origin - pa;
-    float baba = dot(ba, ba);
-    float bard = dot(ba, dir);
-    float baoa = dot(ba, oa);
-    float rdoa = dot(dir, oa);
-    float oaoa = dot(oa, oa);
-    float a = baba - bard * bard;
-    float b = baba * rdoa - baoa * bard;
-    float c = baba * oaoa - baoa * baoa - ra * ra * baba;
-    float h = b * b - a * c;
-    if (h >= 0.0) {
-        float t = (-b - sqrt(h)) / a;
-        float y = baoa + t * bard;
-        // body
-        if (y > 0.0 && y < baba) return t;
-        // caps
-        float3 oc = (y <= 0.0) ? oa : origin - pb;
-        b = dot(dir, oc);
-        c = dot(oc, oc) - ra * ra;
-        h = b * b - c;
-        if (h > 0.0) return -b - sqrt(h);
-    }
-    return -1.0;
 }
 
 };
