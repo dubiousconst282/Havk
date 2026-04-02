@@ -119,7 +119,7 @@ struct Reader {
     }
     bool GetBool() {
         if (Type == kTypeIdentifier) return strcmp(_lastToken.Str, "true") == 0;
-        return false;
+        return GetNum() != 0;
     }
 
     int32_t GetI32() { return (int32_t)GetInt(); }

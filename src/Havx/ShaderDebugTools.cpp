@@ -335,7 +335,12 @@ struct ImageViewerState {
     bool IsPoppedOut = false;
     int LastUsedFrame = 0;
     havk::ImagePtr Canvas;
-    havk::ImagePtr DiffRefCanvas;
+
+    havk::ImagePtr DiffRefSnapshot; // Diff with a previous canvas snapshot 
+    uint32_t DiffRefPlotId = 0;     // Diff with another image plot
+    const char* Label = nullptr;
+
+    bool IsSnapshotDiffRef() { return DiffRefPlotId == 0; } 
 };
 
 struct ShadebugContext {
@@ -550,6 +555,9 @@ struct ShadebugContext {
             }
         }
 
+        if (PickerSelectedTID.x == INT_MIN) {
+            PickerSelectedTID = pars.PickImage ? int2(pars.PickImage->Size) / 2 : int2(0);
+        }
         ImGui::SetNextItemWidth(6 * ImGui::GetFontSize());
         ImGui::DragInt2("Selected TID", &PickerSelectedTID.x, 0.5f);
 
@@ -558,9 +566,6 @@ struct ShadebugContext {
             ImGui::SetNextItemShortcut(ImGuiMod_Ctrl | ImGuiKey_G, ImGuiInputFlags_RouteGlobal | ImGuiInputFlags_Tooltip);
             ImGui::Checkbox("Show Picker", &ShowPicker);
 
-            if (PickerSelectedTID.x == INT_MIN) {
-                PickerSelectedTID = int2(pars.PickImage->Size / 2u);
-            }
             const int numCells = kPickerGridSize - 1 + (kPickerGridSize % 2);
             const int radius = numCells / 2;
 
@@ -604,13 +609,13 @@ struct ShadebugContext {
                 case CommandType::SyncWidget: {
                     // TODO: evict widget slots unused after some frames
                     auto type = (CommandType)(cmd.Data[0] & 255);
-                    shbind::WidgetState& state = widgetData[cmd.Data[0] >> 8].value;
+                    uint32_t slot = cmd.Data[0] >> 8;
 
                     if (type == CommandType::UI_PlotLines) {
                         activePlots.push_back(&cmd);
                     } else {
-                        ImGui::PushID(&state);
-                        DrawWidget(type, cmd.ProgramId, state);
+                        ImGui::PushID((int)slot);
+                        DrawWidget(type, cmd.ProgramId, widgetData[slot].value);
                         ImGui::PopID();
                     }
                     break;
@@ -911,13 +916,15 @@ struct ShadebugContext {
                 break;
             }
             case CommandType::UI_PlotImage: {
-                ImageViewerState* viewer = &ImagePlots[widget.Label ^ (uint32_t)(uintptr_t)&widget];
+                uint32_t id = (uint32_t)ImGui::GetID((int)widget.Label);
+                ImageViewerState* viewer = &ImagePlots[id];
+                viewer->Label = label;
 
                 uint2 size = uint2(widget.Params[0], widget.Params[1]);
-                bool visible = DrawImageViewer(label, viewer, size);
+                bool visible = DrawImageViewer(viewer, size);
 
                 widget.Params[2] = visible && viewer->Canvas && !PauseFrame ? viewer->Canvas->DescriptorHandle.HeapIndex : 0;
-                if (visible) viewer->LastUsedFrame = (int)ImGui::GetFrameCount();
+                if (visible) viewer->LastUsedFrame = ImGui::GetFrameCount();
 
                 break;
             }
@@ -929,9 +936,9 @@ struct ShadebugContext {
     }
 
     // TODO-MAYBE: refactor & expose this to take arbitrary images?
-    bool DrawImageViewer(const char* label, ImageViewerState* state, uint2 imageSize) {
+    bool DrawImageViewer(ImageViewerState* state, uint2 imageSize) {
         ImGui::SetNextItemOpen(state->IsHeaderOpen, ImGuiCond_Appearing);
-        state->IsHeaderOpen = ImGui::TreeNodeEx(label, ImGuiTreeNodeFlags_CollapsingHeader | ImGuiTreeNodeFlags_AllowOverlap, "");
+        state->IsHeaderOpen = ImGui::TreeNodeEx(state->Label, ImGuiTreeNodeFlags_CollapsingHeader | ImGuiTreeNodeFlags_AllowOverlap, "");
 
         ImGui::SameLine(0, 0);
         {
@@ -948,14 +955,14 @@ struct ShadebugContext {
             ImGui::RenderArrowDockMenu(dl, ImGui::GetItemRectMin() + ImVec2(center, center), iconSize, ImGui::GetColorU32(ImGuiCol_Text));
         }
         ImGui::SameLine();
-        ImGui::Text("%s (%dx%d)", label, imageSize.x, imageSize.y);
+        ImGui::Text("%s (%dx%d)", state->Label, imageSize.x, imageSize.y);
 
         if (!state->IsHeaderOpen && !state->IsPoppedOut) return false;
         
         bool ownWindow = state->IsPoppedOut;
         if (ownWindow) {
             char title[256];
-            snprintf(title, sizeof(title), "Image Viewer: %s", label);
+            snprintf(title, sizeof(title), "Image Viewer: %s", state->Label);
             ImGui::Begin(title, &state->IsPoppedOut);
         }
 
@@ -1048,7 +1055,7 @@ struct ShadebugContext {
                     .Format = VK_FORMAT_R16G16B16A16_SFLOAT,
                     .Usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                     .Size = uint3(imageSize, 1),
-                }, havk::DebugLabel("shdbg-%s", label));
+                }, havk::DebugLabel("shdbg-%s", state->Label));
             }
             ImDrawList* dl = ImGui::GetWindowDrawList();
 
@@ -1070,7 +1077,6 @@ struct ShadebugContext {
 
                 shbind::ImageViewerParams pc = {
                     .SrcImage = *state->Canvas,
-                    .RefImage = state->DiffRefCanvas ? *state->DiffRefCanvas : havk::ImageHandle(),
                     .Sampler = Device->DescriptorHeap->GetSampler({
                         .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
                         .magFilter = VK_FILTER_NEAREST,
@@ -1086,6 +1092,16 @@ struct ShadebugContext {
                     .SrcRect = float4(state->ViewPos, state->ViewSize, state->ViewSize),
                     .ClipRect = float4(clipOffset.x, clipOffset.y, previewSize.x * clipScale.x, previewSize.y * clipScale.y),
                 };
+                if (state->DiffRefSnapshot) {
+                    pc.RefImage = *state->DiffRefSnapshot;
+                } else if (state->DiffRefPlotId != 0) {
+                    auto iter = ImagePlots.find(state->DiffRefPlotId);
+
+                    if (iter != ImagePlots.end() && iter->second.Canvas) {
+                        pc.RefImage = *iter->second.Canvas;
+                        iter->second.LastUsedFrame = ImGui::GetFrameCount();
+                    }
+                }
                 cmdList.Draw(*ImageViewerPipeline, { .NumVertices = 6 }, pc);
             });
 
@@ -1115,35 +1131,63 @@ struct ShadebugContext {
         }
         ImGui::EndChild();
 
-        bool wantSaveDiffRef = false;
-
         if (ImGui::BeginPopupContextItem("CtxMenu")) {
             ImGui::CheckboxFlags("Gamma", &state->Flags, ImageViewerState::Gamma);
 
-            int diffMode = (state->Flags & ImageViewerState::DiffMask_) >> ImageViewerState::DiffShift_;
-            bool wasDisabled = diffMode == 0;
-            ImGui::SetNextItemWidth(12 * charWidth);
+            ImGui::PushItemWidth(15 * charWidth);
 
+            int diffMode = (state->Flags & ImageViewerState::DiffMask_) >> ImageViewerState::DiffShift_;
             if (ImGui::Combo("Diffing", &diffMode, "Disabled\0Swipe\0Overlay\0Abs Diff\0")) {
                 state->Flags = (state->Flags & ~ImageViewerState::DiffMask_) | (diffMode << ImageViewerState::DiffShift_);
-                state->DiffCutoff = 0.5f;
-                wantSaveDiffRef |= wasDisabled && diffMode != 0;
             }
-            if (diffMode != 0) {
-                ImGui::TextDisabled("Alt+C: save ref");
+            if ((state->Flags & ImageViewerState::DiffMask_) == ImageViewerState::DiffOverlay) {
+                ImGui::SliderFloat("Opacity", &state->DiffCutoff, 0, 1, "%.2f");
             }
+
+            if (state->Flags & ImageViewerState::DiffMask_) {
+                const char* refTitle = "Snapshot";
+                if (!state->IsSnapshotDiffRef()) {
+                    auto iter = ImagePlots.find(state->DiffRefPlotId);
+
+                    if (iter != ImagePlots.end() && iter->second.Label) {
+                        refTitle = iter->second.Label;
+                    } else {
+                        state->DiffRefPlotId = 0;
+                    }
+                }
+                if (ImGui::BeginCombo("Ref", refTitle)) {
+                    if (ImGui::Selectable("Snapshot")) {
+                        state->DiffRefPlotId = 0;
+                    }
+                    ImGui::Separator();
+                    for (auto& [id, otherViewer] : ImagePlots) {
+                        if (&otherViewer == state || !otherViewer.Label) continue;
+
+                        if (ImGui::Selectable(otherViewer.Label, state->DiffRefPlotId == id)) {
+                            state->DiffRefPlotId = id;
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::TextDisabled("(?)");
+                ImGui::SetItemTooltip(
+                    "Alt+C: save snapshot\n"
+                    "Tab: toggle current/previous image (swipe mode)");
+            }
+
+            ImGui::PopItemWidth();
             ImGui::EndPopup();
         }
 
-        if (state->Flags & ImageViewerState::DiffMask_) {
-            wantSaveDiffRef |= ImGui::Shortcut(ImGuiMod_Alt | ImGuiKey_C, ImGuiInputFlags_RouteGlobal);
-
-            if (wantSaveDiffRef) {
-                state->DiffRefCanvas = std::move(state->Canvas);
+        // Update diff snapshot
+        if ((state->Flags & ImageViewerState::DiffMask_) && state->IsSnapshotDiffRef()) {
+            if (ImGui::Shortcut(ImGuiMod_Alt | ImGuiKey_C, ImGuiInputFlags_RouteGlobal) || state->DiffRefSnapshot == nullptr) {
+                state->DiffRefSnapshot = std::move(state->Canvas);
             }
-        } else if (state->DiffRefCanvas != nullptr) {
-            state->DiffRefCanvas = nullptr;
+        } else if (state->DiffRefSnapshot != nullptr) {
+            state->DiffRefSnapshot = nullptr;
         }
+
         // TODO-MAYBE: save/load image to file
 
         if (ownWindow) ImGui::End();
@@ -1353,14 +1397,33 @@ static void SaveOrLoadSettings(bool save) {
 
     if (save) {
         auto wr = yson::Writer();
-        wr.Write(*g_ctx);
+        wr.BeginObject();
+        wr.Write("PickerSelectedTID", g_ctx->PickerSelectedTID);
+        wr.Write("ImagePlots", g_ctx->ImagePlots);
+
+        wr.BeginArray("Widgets");
+        // TODO: persist widget values
+        wr.EndArray();
+
+        wr.EndObject();
         havx::WriteFileBytes(path, wr.Buffer.data(), wr.Buffer.size(), true);
     } else {
         auto buffer = havx::ReadFileBytes(path);
         auto rd = yson::Reader(std::string_view((char*)buffer.data(), buffer.size()));
 
         if (buffer.empty() || !rd.ReadNext()) return;
-        rd.Parse(*g_ctx);
+
+        while (rd.ReadNext()) {
+            if (rd.Key == "PickerSelectedTID") {
+                rd.Parse(g_ctx->PickerSelectedTID);
+            } else if (rd.Key == "ImagePlots") {
+                rd.Parse(g_ctx->ImagePlots);
+            } else if (rd.Key == "Widgets") {
+                rd.Skip();
+            } else {
+                rd.Skip();
+            }
+        }
     }
 }
 
@@ -1389,5 +1452,4 @@ void Shadebug::DrawFrame(havk::CommandList& cmds, const DrawFrameParams& pars) {
 
 };  // namespace havx
 
-YSON_SERIALIZER_STRUCT_INLINE(havx::ImageViewerState, Flags, ColorRange, DiffCutoff, ViewPos, ViewSize, IsHeaderOpen, IsPoppedOut);
-YSON_SERIALIZER_STRUCT_INLINE(havx::ShadebugContext, PickerSelectedTID, ImagePlots);
+YSON_SERIALIZER_STRUCT_INLINE(havx::ImageViewerState, Flags, ColorRange, DiffCutoff, DiffRefPlotId, ViewPos, ViewSize, IsHeaderOpen, IsPoppedOut);
