@@ -77,7 +77,8 @@ struct TypeGraph {
             slang::DeclReflection* child = entity->getChild(i);
 
             switch (child->getKind()) {
-                case slang::DeclReflection::Kind::Struct: {
+                case slang::DeclReflection::Kind::Struct:
+                case slang::DeclReflection::Kind::Enum: {
                     Entries.insert({ child->getType(), { .Module = module, .Namespace = ns } });
                     break;
                 }
@@ -103,6 +104,10 @@ struct TypeGraph {
                     auto field = type->getFieldByIndex(i);
                     GetOrderedDependencies(field->getType(), postOrder);
                 }
+                postOrder.push_back(type);
+                break;
+            }
+            case slang::TypeReflection::Kind::Enum: {
                 postOrder.push_back(type);
                 break;
             }
@@ -287,6 +292,19 @@ struct CodePrinter {
 
                 Indent();
                 PrintField(field->getType(), field->getName());
+            }
+            End("};\n");
+        } else if (type->getKind() == slang::TypeReflection::Kind::Enum) {
+            AppendFmt("\tenum class %s : ", type->getName());
+            PrintTypeRef(type->getElementType());
+            Append(" {\n");
+            IndentLevel++;
+
+            for (uint32_t i = 0; i < type->getFieldCount(); i++) {
+                auto field = type->getFieldByIndex(i);
+                int64_t value = 0;
+                field->getDefaultValueInt(&value);
+                AppendFmt("\t%s = %lld,\n", field->getName(), value);
             }
             End("};\n");
         } else {

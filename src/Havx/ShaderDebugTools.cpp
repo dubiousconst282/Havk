@@ -18,6 +18,7 @@
 
 using namespace havk::vectors;
 namespace shbind = havx::shader::dbg;
+using shbind::CommandType;
 
 namespace havx {
 
@@ -26,20 +27,6 @@ static constexpr uint32_t kMaxWidgetSlots = 2048; // MUST be a power of two.
 static constexpr int kPickerGridSize = 20;
 static constexpr int kContextScratchSize = 65536;
 
-enum class CommandType : uint8_t {
-    None,
-    FailAssert, SyncWidget,
-    UI_Separator, UI_Text,  // transient (no hash slot)
-    UI_Button, UI_Checkbox, UI_Combo,
-    UI_Slider,
-    UI_Drag1, UI_Drag2, UI_Drag3, UI_Drag4,
-    UI_ColorEdit, UI_PlotLines, UI_PlotImage,
-    G_SetColor, G_SetTransform, G_PushTransform, G_PopTransform,
-    G_Translate, G_Scale, G_RotateX, G_RotateY, G_RotateZ,
-    G_Line, G_Cube, G_Sphere, G_Arrow, G_Text,
-
-    G_ShapeFirst = G_Line, G_ShapeCount = G_Text - G_ShapeFirst + 1,
-};
 using StringId = uint32_t;
 
 static float asfloat(uint32_t x) { return std::bit_cast<float>(x); }
@@ -530,7 +517,7 @@ struct ShadebugContext {
         auto scratchData = buffer.bump_slice(kContextScratchSize);
         auto pixelPickData = buffer.bump_slice(kPickerGridSize * kPickerGridSize);
 
-        ImGui::Begin("ShaderDebugTools");
+        bool isWindowVisible = ImGui::Begin("ShaderDebugTools");
 
         if (ImGui::Button("Reset Widgets")) {
             memset(widgetKeys.data(), 0, widgetKeys.size_bytes());
@@ -561,7 +548,7 @@ struct ShadebugContext {
         ImGui::SetNextItemWidth(6 * ImGui::GetFontSize());
         ImGui::DragInt2("Selected TID", &PickerSelectedTID.x, 0.5f);
 
-        if (pars.PickImage != nullptr) {
+        if (pars.PickImage != nullptr && isWindowVisible) {
             ImGui::SameLine();
             ImGui::SetNextItemShortcut(ImGuiMod_Ctrl | ImGuiKey_G, ImGuiInputFlags_RouteGlobal | ImGuiInputFlags_Tooltip);
             ImGui::Checkbox("Show Picker", &ShowPicker);
@@ -679,7 +666,7 @@ struct ShadebugContext {
             cmds.EndRendering();
         }
 
-        if (activePlots.size() > 0) {
+        if (activePlots.size() > 0 && isWindowVisible) {
             const auto plotChildFlags = ImGuiChildFlags_AutoResizeX | ImGuiChildFlags_ResizeY;
             const auto plotFlags = ImPlotFlags_Equal;
 
@@ -727,11 +714,11 @@ struct ShadebugContext {
         ImGuiViewport* viewport = ImGui::GetMainViewport();
         ImVec2 selectedPos = viewport->Pos + ImVec2(PickerSelectedTID.x, PickerSelectedTID.y);
 
-        if (pars.PickImage != nullptr) {
+        if (pars.PickImage != nullptr && isWindowVisible) {
             ImDrawList* bgdl = ImGui::GetBackgroundDrawList(viewport);
             bgdl->AddCircle(selectedPos, int(kPickerGridSize / 2) + 2, IM_COL32(192, 192, 192, 240), 0, 2.0f);
         }
-        if (ShowPicker && pars.PickImage != nullptr) {
+        if (ShowPicker && pars.PickImage != nullptr && isWindowVisible) {
             const int numCells = kPickerGridSize - 1 + (kPickerGridSize % 2);
             const int radius = numCells / 2;
             

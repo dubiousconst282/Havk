@@ -41,18 +41,20 @@ struct WidgetState {
     StringId Label;
     uint32_t Params[7];
 };
-// This must be mirrored in host manually because binding generator does not support enums yet (TODO)
 enum CommandType : uint8_t {
     None,
     FailAssert, SyncWidget,
+
     UI_Separator, UI_Text,  // transient (no hash slot)
     UI_Button, UI_Checkbox, UI_Combo,
     UI_Slider,
     UI_Drag1, UI_Drag2, UI_Drag3, UI_Drag4,
     UI_ColorEdit, UI_PlotLines, UI_PlotImage,
+
     G_SetColor, G_SetTransform, G_PushTransform, G_PopTransform,
     G_Translate, G_Scale, G_RotateX, G_RotateY, G_RotateZ,
     G_Line, G_Cube, G_Sphere, G_Arrow, G_Text,
+    G_ShapeFirst = G_Line, G_ShapeCount = G_Text - G_ShapeFirst + 1,
 };
 struct Command {
     uint8_t Length;
