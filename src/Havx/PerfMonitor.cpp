@@ -133,7 +133,6 @@ struct PerfmonContext {
         ImGui::BeginChild("##PerfPlotFrame", frameMinSize, childFrameFlags);
 
         if (ImPlot::BeginPlot("##PerfTimingHistory", ImGui::GetContentRegionAvail(), ImPlotFlags_NoLegend)) {
-            ImPlot::PushStyleVar(ImPlotStyleVar_FillAlpha, 0.25f);
             ImPlot::SetupAxes(nullptr, nullptr, ImPlotAxisFlags_NoTickLabels, 0);
             ImPlot::SetupAxisFormat(ImAxis_Y1,[](double value, char* buf, int size, void*) {
                 return snprintf(buf, (size_t)size, "%gms", value);
@@ -174,16 +173,18 @@ struct PerfmonContext {
                 for (uint32_t j = 0; j < kSampleHistorySize; j++) {
                     currHistory[j] = prevHistory[j] + scope->ElapsedSamplesGPU[j] * 1000;
                 }
+                ImPlotSpec spec;
+                spec.FillAlpha = 0.5f;
 
                 uint32_t hoverX = (uint32_t)round(hoverPoint.x);
                 if (hoverX < kSampleHistorySize && hoverPoint.y >= prevHistory[hoverX] && hoverPoint.y <= currHistory[hoverX]) {
                     currHoveredScope = scope;
+                    spec.FillAlpha = 0.75f;
                     if (plotItem != nullptr) plotItem->LegendHovered = true;
                 }
-                ImPlot::PlotShaded(scope->Label, frameTicksX, currHistory, prevHistory, kSampleHistorySize);
-                ImPlot::PlotLine(scope->Label, currHistory, kSampleHistorySize);
+                ImPlot::PlotShaded(scope->Label, frameTicksX, currHistory, prevHistory, kSampleHistorySize, spec);
+                ImPlot::PlotLine(scope->Label, currHistory, kSampleHistorySize, 1, 0, spec);
             }
-            ImPlot::PopStyleVar();
 
             ImPlot::EndPlot();
         }

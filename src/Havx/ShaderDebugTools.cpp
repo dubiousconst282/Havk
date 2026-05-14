@@ -233,7 +233,7 @@ struct ShapeBuilder {
             if (StrokeColor >= 0x01000000) drawList->AddLine(v1, v2, ImColSwap(StrokeColor), StrokeWidth);
         } else if (type == CommandType::G_Cube) {
             if (FillColor >= 0x01000000) drawList->AddRectFilled(v1, v2, ImColSwap(FillColor));
-            if (StrokeColor >= 0x01000000) drawList->AddRect(v1, v2, ImColSwap(StrokeColor), 0, 0, StrokeWidth);
+            if (StrokeColor >= 0x01000000) drawList->AddRect(v1, v2, ImColSwap(StrokeColor), 0, StrokeWidth);
         } else if (type == CommandType::G_Sphere) {
             float radius = asfloat(args[3]);
             if (FillColor >= 0x01000000) drawList->AddCircleFilled(v1, radius, ImColSwap(FillColor));
@@ -688,7 +688,8 @@ struct ShadebugContext {
             ImGui::BeginChild("##ShaderPlotFrame", minFrameSize, plotChildFlags);
 
             if (ImPlot::BeginPlot("##ShaderPlot", ImGui::GetContentRegionAvail(), plotFlags)) {
-                ImPlot::PushStyleVar(ImPlotStyleVar_LineWeight, 3.0f);
+                ImPlotSpec spec;
+                spec.LineWeight = 3.0f;
 
                 ImVec2 plotSize = ImPlot::GetPlotSize();
                 ImPlotRect plotRange = ImPlot::GetPlotLimits();
@@ -703,7 +704,7 @@ struct ShadebugContext {
                     float rangeMin = asfloat(state.Params[2]);
                     float rangeMax = asfloat(state.Params[3]);
                     float scale = (rangeMax - rangeMin) / (numSamples - 1);
-                    ImPlot::PlotLine(label, data, numSamples, scale, rangeMin);
+                    ImPlot::PlotLine(label, data, numSamples, scale, rangeMin, spec);
 
                     uint32_t numSamplesOptimal = std::max(std::min((uint32_t)(plotSize.x * 2 + 0.5), 4096u), 64u);
                     state.Params[0] = nextDataOffset;
@@ -712,7 +713,6 @@ struct ShadebugContext {
                     state.Params[3] = std::bit_cast<uint32_t>((float)plotRange.X.Max);
                     nextDataOffset += numSamplesOptimal;
                 }
-                ImPlot::PopStyleVar();
                 ImPlot::EndPlot();
             }
             ImGui::EndChild();

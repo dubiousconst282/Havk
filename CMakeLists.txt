@@ -29,7 +29,7 @@ if (EXISTS "${vulkan_sdk_dir}/include/slang/slang.h")
     set_target_properties(slang::slang PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${vulkan_sdk_dir}/include/slang")
     set(slang_SOURCE_DIR ${vulkan_sdk_dir})
 else()
-    set(slang_version "2025.24.3")
+    set(slang_version "2026.8.1")
 
     if (CMAKE_HOST_WIN32)
         set(slang_package_platform_name "windows-x86_64")
@@ -60,8 +60,8 @@ elseif (CMAKE_HOST_LINUX)
 endif()
 
 if (HAVK_ENABLE_GFX_EXTENSIONS)
-    CPMAddPackage("gh:ocornut/imgui#v1.92.6-docking")
-    CPMAddPackage("gh:epezent/implot#v0.17")
+    CPMAddPackage("gh:ocornut/imgui#v1.92.8-docking")
+    CPMAddPackage("gh:epezent/implot#1351ab2")
 
     add_library(imgui STATIC
         ${imgui_SOURCE_DIR}/imgui.cpp

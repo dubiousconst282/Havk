@@ -231,9 +231,8 @@ struct ImGuiRenderer {
                     // We behave slightly differently from standard ImGui backends to improve consistency:
                     // - Interleaving with other commands will ~randomly break scissor rect, always set it beforehand
                     // - User will amost always need to emit ResetState, always reset afterwards
-                    if (cmd.UserCallback != ImDrawCallback_ResetRenderState) {
-                        cmd.UserCallback(draw_list, &cmd);
-                    }
+                    cmd.UserCallback(draw_list, &cmd);
+
                     BindRenderState(draw_data, cmdList, fb_width, fb_height, *renderBuffer);
                     currTexId = 0;
                 } else {
