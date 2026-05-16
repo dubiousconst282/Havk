@@ -120,16 +120,12 @@ struct ImGuiRenderer {
             { "/usr/share/fonts/TTF/DejaVuSans.ttf", 13.0f },
 #endif
         };
+
+        ImFontConfig fontConfig;
+        fontConfig.Flags |= ImFontFlags_NoLoadError;
+
         for (auto [filename, size] : trialFontFiles) {
-            // Check if file exists
-#if _WIN32
-            if (FILE* fs; fopen_s(&fs, filename, "rb") == 0) fclose(fs);
-            else continue;
-#else
-            if (access(filename, R_OK) != 0) continue;
-#endif
-            io.Fonts->AddFontFromFileTTF(filename, size);
-            break;
+            if (io.Fonts->AddFontFromFileTTF(filename, size, &fontConfig)) break;
         }
     }
 

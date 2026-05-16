@@ -962,10 +962,11 @@ struct ShadebugContext {
             if (i != 0) ImGui::SameLine();
 
             ImGui::PushStyleColor(ImGuiCol_FrameBg, cols[i]);
+            ImGui::PushStyleColor(ImGuiCol_CheckboxSelectedBg, cols[i]);
             ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, cols[i] | 0x1F1F1F);
             ImGui::PushStyleColor(ImGuiCol_CheckMark, 0xFFFFFFFF);
             ImGui::CheckboxFlags(ids[i], &state->Flags, 1 << i);
-            ImGui::PopStyleColor(3);
+            ImGui::PopStyleColor(4);
 
             if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
                 int otherChannels = ImageViewerState::RGBA & ~(1 << i);
