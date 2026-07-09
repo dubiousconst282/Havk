@@ -87,7 +87,11 @@ struct PerfmonContext {
 
     void DrawFrame() {
         double currTime = havx::GetMonotonicTime();
-        ElapsedFrameIntervals[CurrFrameNo % kSampleHistorySize] = currTime - PrevFrameTime;
+        if (PrevFrameTime > 0.0) {
+            ElapsedFrameIntervals[CurrFrameNo % kSampleHistorySize] = currTime - PrevFrameTime;
+        } else {
+            ElapsedFrameIntervals[CurrFrameNo % kSampleHistorySize] = 0.0f;
+        }
         PrevFrameTime = currTime;
 
         ImGui::Begin("PerfMonitor");
