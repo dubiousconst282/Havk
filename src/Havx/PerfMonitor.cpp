@@ -87,7 +87,11 @@ struct PerfmonContext {
 
     void DrawFrame() {
         double currTime = havx::GetMonotonicTime();
-        ElapsedFrameIntervals[CurrFrameNo % kSampleHistorySize] = currTime - PrevFrameTime;
+        if (PrevFrameTime > 0.0) {
+            ElapsedFrameIntervals[CurrFrameNo % kSampleHistorySize] = currTime - PrevFrameTime;
+        } else {
+            ElapsedFrameIntervals[CurrFrameNo % kSampleHistorySize] = 0.0f;
+        }
         PrevFrameTime = currTime;
 
         ImGui::Begin("PerfMonitor");
@@ -108,11 +112,15 @@ struct PerfmonContext {
         }
 
         const double oneMB = 1024 * 1024;
-        VmaBudget memBudget;
-        vmaGetHeapBudgets(Device->Allocator, &memBudget);
+        VmaBudget budgets[VK_MAX_MEMORY_HEAPS] = {};
+        vmaGetHeapBudgets(Device->Allocator, budgets);
 
-        ImGui::Text("Memory: %.1fMB used, %.1fMB reserved (%d allocs)", memBudget.statistics.allocationBytes / oneMB,
-                    memBudget.statistics.blockBytes / oneMB, memBudget.statistics.allocationCount);
+        const VmaBudget& memBudget = budgets[0];
+
+        ImGui::Text("Memory: %.1fMB used, %.1fMB reserved (%d allocs)",
+                    memBudget.statistics.allocationBytes / oneMB,
+                    memBudget.statistics.blockBytes / oneMB,
+                    memBudget.statistics.allocationCount);
 
         DrawTimingsOverview();
 
@@ -157,7 +165,7 @@ struct PerfmonContext {
 
             for (Scope* scope : leafScopes) {
                 ImPlotItem* plotItem = ImPlot::GetItem(scope->Label);
-                
+
                 if (plotItem != nullptr) {
                     if (scope->Color != 0) {
                         plotItem->Color = scope->Color;
@@ -229,9 +237,14 @@ struct PerfmonContext {
                     }
                 }
                 char buffer[32];
-                ImGui::Text("%s", FormatTime(buffer, sumElapsed / numSamples));
+                float avgElapsed = (numSamples > 0) ? (sumElapsed / numSamples) : 0.0f;
+                ImGui::Text("%s", FormatTime(buffer, avgElapsed));
+
                 ImGui::TableNextColumn();
-                ImGui::Text("%.1f%%", sumElapsed / (cpuTimings ? histTotalElapsedCPU : histTotalElapsedGPU) * 100);
+
+                double total = cpuTimings ? histTotalElapsedCPU : histTotalElapsedGPU;
+                float pct = (total > 0) ? (float)((sumElapsed / total) * 100.0) : 0.0f;
+                ImGui::Text("%.1f%%", pct);
             };
 
             auto drawScope = [&](auto& visitScope, Scope* scope) -> void {
