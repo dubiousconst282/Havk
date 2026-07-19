@@ -325,7 +325,9 @@ struct ImageViewerState {
 
     havk::ImagePtr DiffRefSnapshot; // Diff with a previous canvas snapshot 
     uint32_t DiffRefPlotId = 0;     // Diff with another image plot
+
     const char* Label = nullptr;
+    shader::dbg::WidgetState* Widget = nullptr;
 
     bool IsSnapshotDiffRef() { return DiffRefPlotId == 0; } 
 };
@@ -706,7 +708,10 @@ struct ShadebugContext {
         }
 
         for (auto& [widgetId, viewer] : ImagePlots) {
+            // Release unused plot images after a little bit.
+            // Also erase widget metadata to avoid crashing the GPU on stale descriptors.
             if (viewer.Canvas && ImGui::GetFrameCount() - viewer.LastUsedFrame >= 2) {
+                memset(viewer.Widget->Params, 0, sizeof(viewer.Widget->Params));
                 viewer.Canvas = nullptr;
             }
         }
@@ -906,12 +911,13 @@ struct ShadebugContext {
                 uint32_t id = (uint32_t)ImGui::GetID((int)widget.Label);
                 ImageViewerState* viewer = &ImagePlots[id];
                 viewer->Label = label;
+                viewer->Widget = &widget;
 
                 uint2 size = uint2(widget.Params[0], widget.Params[1]);
                 bool visible = DrawImageViewer(viewer, size);
 
                 widget.Params[2] = visible && viewer->Canvas && !PauseFrame ? viewer->Canvas->DescriptorHandle.HeapIndex : 0;
-                if (visible) viewer->LastUsedFrame = ImGui::GetFrameCount();
+                if (visible || PauseFrame) viewer->LastUsedFrame = ImGui::GetFrameCount();
 
                 break;
             }
