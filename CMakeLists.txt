@@ -25,11 +25,13 @@ CPMAddPackage("gh:g-truc/glm#1.0.1")
 add_library(slang::slang SHARED IMPORTED)
 cmake_path(GET Vulkan_INCLUDE_DIR PARENT_PATH vulkan_sdk_dir)
 
-if (EXISTS "${vulkan_sdk_dir}/include/slang/slang.h")
+if ((EXISTS "${vulkan_sdk_dir}/include/slang/slang.h") AND (NOT HAVK_SLANG_VERSION))
     set_target_properties(slang::slang PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${vulkan_sdk_dir}/include/slang")
     set(slang_SOURCE_DIR ${vulkan_sdk_dir})
 else()
-    set(slang_version "2026.8.1")
+    if (NOT HAVK_SLANG_VERSION)
+        set(HAVK_SLANG_VERSION "2026.12.0.1")
+    endif()
 
     if (CMAKE_HOST_WIN32)
         set(slang_package_platform_name "windows-x86_64")
@@ -41,8 +43,8 @@ else()
 
     CPMAddPackage(
         NAME slang
-        URL "https://github.com/shader-slang/slang/releases/download/v${slang_version}/slang-${slang_version}-${slang_package_platform_name}.zip"
-        VERSION ${slang_version}
+        URL "https://github.com/shader-slang/slang/releases/download/v${HAVK_SLANG_VERSION}/slang-${HAVK_SLANG_VERSION}-${slang_package_platform_name}.zip"
+        VERSION ${HAVK_SLANG_VERSION}
     )
     set_target_properties(slang::slang PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${slang_SOURCE_DIR}/include")
 endif()
